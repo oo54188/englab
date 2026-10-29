@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#FBFBF8">
+<!-- 在线朗读音频由第三方合成，请求不能带 Referer（带上会被源站拒绝返回空音频） -->
+<meta name="referrer" content="no-referrer">
 <link rel="manifest" href="./manifest.json">
 <link rel="apple-touch-icon" href="./apple-touch-icon.png">
 <link rel="icon" type="image/png" sizes="32x32" href="./favicon-32.png">
@@ -3075,7 +3077,7 @@ var SHADOW = [
 /* ==== el8_state.js ==== */
 /* ===== 状态、存储、语音、评分、通用 UI ===== */
 var LS_KEY = "englab_v2";
-var DB = { srs:{}, days:{}, use:{}, goal:20, rate:0.92, voice:"", start:"" };
+var DB = { srs:{}, days:{}, use:{}, goal:20, rate:0.92, voice:"", start:"", net:"online" };
 function useWord(w, kind){
   var k=String(w||"").toLowerCase(); if(!k) return;
   if(!DB.use) DB.use={};
@@ -3106,6 +3108,7 @@ function loadDB(){
     if(raw){ var o=JSON.parse(raw)||{};
       DB.srs = o.srs||{}; DB.days = o.days||{}; DB.use = o.use||{}; DB.mat = o.mat||{};
       DB.goal = o.goal||20; DB.rate = o.rate||0.92; DB.voice = o.voice||"";
+      DB.net = (o.net==="local"||o.net==="online") ? o.net : "online";
       DB.start = o.start||"";
       DB.wd = o.wd||{}; DB.paste = o.paste||[];
       DB.rec = o.rec||{}; DB.wait = o.wait||{};
@@ -3209,16 +3212,138 @@ function pickVoice(){
   for(var j=0;j<en.length;j++) if(pref.test(en[j].name)) return en[j];
   return en[0];
 }
-function stopSpeak(){ if(window.speechSynthesis) speechSynthesis.cancel(); }
-function speak(text, rate, cb){
-  if(!window.speechSynthesis){ toast("此浏览器不支持朗读，请换 Chrome / Edge"); return; }
+/* --- 系统语音（本机语音包） --- */
+function localSpeak(text, rate, cb){
+  if(!window.speechSynthesis){ toast("此浏览器不支持系统朗读，请换 Chrome / Edge"); if(cb) cb(); return; }
   speechSynthesis.cancel();
   var u=new SpeechSynthesisUtterance(String(text));
   var v=pickVoice();
   if(v){ u.voice=v; u.lang=v.lang; } else { u.lang="en-US"; }
-  u.rate=rate||DB.rate; u.pitch=1;
+  u.rate=rate||DB.rate||0.92; u.pitch=1;
+  u.onerror=function(){ if(cb) cb(); };
   if(cb){ u.onend=cb; }
   speechSynthesis.speak(u);
+}
+
+/* --- 在线语音（无需本机英文语音包） ---
+   音频用 <audio> 直连第三方合成接口播放：不需要 CORS，只要求请求不带 Referer
+   （文档级 referrer 策略已在 head 设为 no-referrer）。
+   单词/短语走有道词典发音，整句走百度翻译发音；任一路失败自动换另一路。 */
+var NET = { el:null, seq:0, unlocked:false, down:false };
+function netAudio(){
+  if(!NET.el){
+    NET.el = new Audio();
+    NET.el.preload = "auto";
+    NET.el.setAttribute("playsinline","");
+  }
+  return NET.el;
+}
+function isShortTerm(t){
+  var s=String(t||"").trim();
+  if(!s || s.length>40) return false;
+  if(/[.!?;]/.test(s)) return false;
+  return s.split(/\s+/).filter(Boolean).length<=4;
+}
+function netUrls(t){
+  var q=encodeURIComponent(String(t).trim()), out=[];
+  if(isShortTerm(t)) out.push("https://dict.youdao.com/dictvoice?audio="+q+"&type=2");
+  out.push("https://fanyi.baidu.com/gettts?lan=en&text="+q+"&spd=3&source=web");
+  if(!isShortTerm(t)) out.push("https://dict.youdao.com/dictvoice?audio="+q+"&type=2");
+  return out;
+}
+function ttsChunks(t){
+  t=String(t==null?"":t).replace(/\s+/g," ").trim();
+  if(t.length<=110) return t?[t]:[];
+  var parts=t.match(/[^.!?;:,]+[.!?;:,]*\s*/g)||[t], out=[], buf="";
+  for(var i=0;i<parts.length;i++){
+    if((buf+parts[i]).length>110 && buf){ out.push(buf.trim()); buf=parts[i]; }
+    else buf+=parts[i];
+  }
+  if(buf.trim()) out.push(buf.trim());
+  return out;
+}
+function netStop(){
+  NET.seq++;
+  if(NET.el){ try{ NET.el.onended=null; NET.el.onerror=null; NET.el.pause(); }catch(e){} }
+}
+function netPlayOne(url, rate, cb){
+  var el=netAudio(), my=++NET.seq, done=false;
+  function fin(ok){ if(done) return; done=true; if(my!==NET.seq) return; cb&&cb(ok); }
+  el.onended=null; el.onerror=null;
+  el.muted=false;
+  el.onended=function(){ fin(true); };
+  el.onerror=function(){ fin(false); };
+  try{ el.pause(); }catch(e){}
+  el.src=url;
+  try{ el.defaultPlaybackRate=el.playbackRate=rate||1; }catch(e){}
+  try{ el.preservesPitch=true; el.webkitPreservesPitch=true; el.mozPreservesPitch=true; }catch(e){}
+  var p=el.play();
+  if(p && p.catch) p.catch(function(){ fin(false); });
+  setTimeout(function(){ if(!done && my===NET.seq && el.readyState===0 && el.networkState===3) fin(false); }, 6000);
+}
+function netSeq(chunks, idx, rate, done){
+  if(idx>=chunks.length){ done&&done(true); return; }
+  var urls=netUrls(chunks[idx]), k=0;
+  (function tryUrl(){
+    if(k>=urls.length){ done&&done(false); return; }
+    netPlayOne(urls[k++], rate, function(ok){
+      if(ok) netSeq(chunks, idx+1, rate, done);
+      else tryUrl();
+    });
+  })();
+}
+function netSay(text, rate, cb){
+  var cs=ttsChunks(text);
+  if(!cs.length){ cb&&cb(); return; }
+  netSeq(cs, 0, rate||DB.rate||0.92, function(ok){ if(cb) cb(ok); });
+}
+/* iOS/Safari 要求音频首次播放由用户手势触发：首屏第一次点击时悄悄解锁一个静音音频 */
+function unlockTTS(){
+  if(NET.unlocked) return;
+  NET.unlocked=true;
+  try{
+    var sr=8000, n=400, buf=new ArrayBuffer(44+n), v=new DataView(buf), u=new Uint8Array(buf);
+    function str(o,s){ for(var i=0;i<s.length;i++) u[o+i]=s.charCodeAt(i); }
+    str(0,"RIFF"); v.setUint32(4,36+n,true); str(8,"WAVEfmt "); v.setUint32(16,16,true);
+    v.setUint16(20,1,true); v.setUint16(22,1,true); v.setUint32(24,sr,true);
+    v.setUint32(28,sr,true); v.setUint16(32,1,true); v.setUint16(34,8,true);
+    str(36,"data"); v.setUint32(40,n,true);
+    for(var j=0;j<n;j++) u[44+j]=128;
+    var s=""; for(var m=0;m<u.length;m++) s+=String.fromCharCode(u[m]);
+    var el=netAudio(), my=++NET.seq;
+    el.muted=true; el.onended=null; el.onerror=null;
+    el.src = "da" + "ta:audio/wav;base64," + btoa(s);
+    var p=el.play(); if(p && p.catch) p.catch(function(){});
+    setTimeout(function(){
+      if(my===NET.seq){ try{ el.pause(); el.muted=false; el.removeAttribute("src"); }catch(e){} }
+    },150);
+  }catch(e){}
+}
+document.addEventListener("pointerdown", unlockTTS, {passive:true});
+
+function ttsMode(){ return DB.net||"online"; }
+function ttsAvail(){
+  if(ttsMode()==="local") return hasLocalEn();
+  return true;
+}
+function hasLocalEn(){ return enVoices().length>0; }
+
+function stopSpeak(){
+  netStop();
+  if(window.speechSynthesis) speechSynthesis.cancel();
+}
+function speak(text, rate, cb){
+  var t=String(text==null?"":text).trim();
+  if(!t){ if(cb) cb(); return; }
+  stopSpeak();
+  var r=rate||DB.rate||0.92, mode=ttsMode();
+  if(mode==="local"){ localSpeak(t,r,cb); return; }
+  netSay(t, r, function(ok){
+    if(ok){ if(cb) cb(); return; }
+    if(hasLocalEn()){ localSpeak(t,r,cb); return; }
+    if(!NET.down){ NET.down=true; toast("在线语音连不上，先检查网络；本机也没有英文语音包"); }
+    if(cb) cb();
+  });
 }
 function speakSeq(list, gap, done){
   var i=0;
@@ -4436,7 +4561,14 @@ function htmlMe(){
     '<div class="seg">'+rateBtn(0.8,"0.8 慢")+rateBtn(0.92,"0.92 标准")+rateBtn(1.05,"1.05 快")+'</div>'+
     '<div class="small muted" style="margin:10px 0 4px">每日词量目标</div>'+
     '<div class="seg">'+goalBtn(10)+goalBtn(20)+goalBtn(30)+'</div>'+
-    '<div class="small muted" style="margin:10px 0 4px">发音人</div>'+
+    '<div class="small muted" style="margin:10px 0 4px">朗读语音来源</div>'+
+    '<div class="seg">'+ttsBtn("online","在线语音")+ttsBtn("local","系统语音")+'</div>'+
+    '<div class="tiny muted" style="margin-top:6px;line-height:1.7">'+esc(ttsHint())+'</div>'+
+    '<div class="row" style="margin-top:8px">'+
+      '<button class="btn sm ghost" onclick="speak(\'Reading makes you smarter than you think.\')">试听一句</button>'+
+      '<button class="btn sm ghost" onclick="netCheck()">检测在线语音</button>'+
+    '</div>'+
+    '<div class="small muted" style="margin:10px 0 4px">发音人（仅系统语音生效）</div>'+
     '<select onchange="setVoice(this.value)">'+voiceOpts()+'</select>'+
     '<div class="tiny muted" style="margin-top:8px">'+esc(asrHint()||"录音评分可用：Chrome / Edge 效果最好，Safari 需 iOS 14.5+。")+'</div>'+
     '</div>';
@@ -4502,6 +4634,25 @@ function heatHtml(){
 }
 function rateBtn(v,label){
   return '<button class="'+(Math.abs((DB.rate||0.92)-v)<0.01?"on":"")+'" onclick="DB.rate='+v+';saveDB();render();toast(\'语速已改\')">'+label+'</button>';
+}
+function ttsBtn(v,label){
+  return '<button class="'+((DB.net||"online")===v?"on":"")+'" onclick="DB.net=\''+v+'\';saveDB();render();toast(\'语音来源已切换\')">'+label+'</button>';
+}
+function ttsHint(){
+  if((DB.net||"online")==="local"){
+    var n=enVoices().length;
+    return n? ("系统语音：用本机语音包朗读（已检测到 "+n+" 个英文发音人）。断网也能用，但音质取决于本机装的语音包。")
+            : ("系统语音：本机没检测到英文语音包，读英文很可能没声音。建议用「在线语音」。");
+  }
+  return "在线语音：音频由网络合成，本机没装英文语音包也能正常朗读。单词走词典发音，整句走翻译发音，需联网。";
+}
+function netCheck(){
+  if((DB.net||"online")!=="online"){ DB.net="online"; saveDB(); render(); }
+  toast("正在检测在线语音…");
+  netPlayOne("https://fanyi.baidu.com/gettts?lan=en&text="+encodeURIComponent("Online voice works. You can hear this.")+"&spd=3&source=web", 1, function(ok){
+    NET.down = !ok;
+    toast(ok?"在线语音正常，可以朗读":"在线语音连不上，请检查网络后再试");
+  });
 }
 function goalBtn(n){
   return '<button class="'+((DB.goal||20)===n?"on":"")+'" onclick="DB.goal='+n+';saveDB();render()">'+n+'</button>';
