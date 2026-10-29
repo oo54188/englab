@@ -1,5 +1,5 @@
 /* EngLab Service Worker — 让应用断网也能打开 */
-const VERSION = 'englab-v2';
+const VERSION = 'englab-v3';
 const CORE = [
   './',
   './index.html',
@@ -31,6 +31,12 @@ self.addEventListener('fetch', (e) => {
   if (req.method !== 'GET') return;
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return;
+
+  // 离线语音包：直连网络，不进 Cache（体积大，且应用会把内容另存进 IndexedDB）
+  if (url.pathname.indexOf('voice-pack.json') >= 0) {
+    e.respondWith(fetch(req).catch(() => new Response('{}', { status: 503, headers: { 'Content-Type': 'application/json' } })));
+    return;
+  }
 
   // 页面导航：先网络（保证拿到新版），断网/失败回退缓存
   if (req.mode === 'navigate') {
