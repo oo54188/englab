@@ -3077,7 +3077,7 @@ var SHADOW = [
 /* ==== el8_state.js ==== */
 /* ===== 状态、存储、语音、评分、通用 UI ===== */
 var LS_KEY = "englab_v2";
-var DB = { srs:{}, days:{}, use:{}, goal:20, rate:0.92, voice:"", start:"", net:"online" };
+var DB = { srs:{}, days:{}, use:{}, goal:20, rate:0.92, voice:"", start:"", net:"online", off:0 };
 function useWord(w, kind){
   var k=String(w||"").toLowerCase(); if(!k) return;
   if(!DB.use) DB.use={};
@@ -3109,6 +3109,7 @@ function loadDB(){
       DB.srs = o.srs||{}; DB.days = o.days||{}; DB.use = o.use||{}; DB.mat = o.mat||{};
       DB.goal = o.goal||20; DB.rate = o.rate||0.92; DB.voice = o.voice||"";
       DB.net = (o.net==="local"||o.net==="online") ? o.net : "online";
+      DB.off = o.off?1:0;
       DB.start = o.start||"";
       DB.wd = o.wd||{}; DB.paste = o.paste||[];
       DB.rec = o.rec||{}; DB.wait = o.wait||{};
@@ -3229,6 +3230,112 @@ function localSpeak(text, rate, cb){
    音频用 <audio> 直连第三方合成接口播放：不需要 CORS，只要求请求不带 Referer
    （文档级 referrer 策略已在 head 设为 no-referrer）。
    单词/短语走有道词典发音，整句走百度翻译发音；任一路失败自动换另一路。 */
+/* --- 离线语音包：词库发音预生成，下载一次存进 IndexedDB，之后完全断网也能读 ---
+   优先级：本地离线包 > 在线合成 > 系统语音。离线包只覆盖词库单词，句子/文章仍需联网。 */
+var OFF = { map:{}, state:"none", busy:false, count:0, idb:null };
+function offIdb(){
+  return new Promise(function(res,rej){
+    if(OFF.idb) return res(OFF.idb);
+    if(!window.indexedDB) return rej(new Error("浏览器不支持 IndexedDB"));
+    var r;
+    try{ r=indexedDB.open("englab_voice",1); }catch(e){ return rej(e); }
+    r.onupgradeneeded=function(){ try{ r.result.createObjectStore("kv"); }catch(e){} };
+    r.onsuccess=function(){ OFF.idb=r.result; res(r.result); };
+    r.onerror=function(){ rej(r.error); };
+  });
+}
+function offIdbOp(mode, fn){
+  return offIdb().then(function(db){
+    return new Promise(function(res,rej){
+      var q;
+      try{
+        var t=db.transaction("kv",mode), st=t.objectStore("kv");
+        q=fn(st);
+        t.oncomplete=function(){ res(q?q.result:null); };
+        t.onerror=function(){ rej(t.error); };
+        t.onabort=function(){ rej(t.error); };
+      }catch(e){ rej(e); }
+    });
+  });
+}
+function offIdbGet(k){ return offIdbOp("readonly", function(st){ return st.get(k); }); }
+function offIdbPut(k,v){ return offIdbOp("readwrite", function(st){ return st.put(v,k); }); }
+function offIdbDel(k){ return offIdbOp("readwrite", function(st){ return st.delete(k); }); }
+function offLoad(){
+  return offIdbGet("pack").then(function(v){
+    if(v && v.d && typeof v.d==="object" && Object.keys(v.d).length){
+      OFF.map=v.d; OFF.count=v.count||Object.keys(v.d).length; OFF.state="ready";
+    }else{ OFF.map={}; OFF.count=0; OFF.state="none"; }
+    offPaint();
+  }).catch(function(){ OFF.state="none"; offPaint(); });
+}
+function offKey(t){
+  return String(t==null?"":t).trim().toLowerCase().replace(/^[^a-z']+|[^a-z']+$/g,"");
+}
+function offSrc(t){
+  if(OFF.state!=="ready") return null;
+  var k=offKey(t);
+  if(!k) return null;
+  var b=OFF.map[k];
+  return b? ("data:audio/mpeg;base64,"+b) : null;
+}
+function vocabUniq(){
+  var s={}, i, w;
+  for(i=0;i<VOCAB.length;i++){ w=String(VOCAB[i]&&VOCAB[i].w||"").toLowerCase().trim(); if(w) s[w]=1; }
+  return Object.keys(s).length;
+}
+function offInstall(){
+  if(OFF.busy) return;
+  if(location.protocol==="file:"){ toast("file:// 打开时浏览器禁止读取本地包，请用网址打开后再下载"); return; }
+  OFF.busy=true; offPaint();
+  fetch("./voice-pack.json", {cache:"no-store"}).then(function(r){
+    if(!r.ok) throw new Error("HTTP "+r.status);
+    return r.json();
+  }).then(function(j){
+    if(!j || !j.d || !Object.keys(j.d).length) throw new Error("语音包内容异常");
+    return offIdbPut("pack", { v:j.v||1, ts:Date.now(), count:j.count||0, d:j.d }).then(function(){
+      OFF.map=j.d; OFF.count=j.count||Object.keys(j.d).length; OFF.state="ready";
+      DB.off=1; saveDB();
+    });
+  }).then(function(){
+    OFF.busy=false; offPaint();
+    toast("离线语音包装好了："+OFF.count+" 个词断网也能读");
+  }).catch(function(e){
+    OFF.busy=false; offPaint();
+    toast("下载失败："+(e&&e.message?e.message:"网络问题")+"，联网后再点一次");
+  });
+}
+function offRemove(){
+  if(!confirm("删除已下载的离线语音包？删除后单词发音要靠联网。")) return;
+  offIdbDel("pack").then(function(){
+    OFF.map={}; OFF.count=0; OFF.state="none"; DB.off=0; saveDB(); offPaint();
+    toast("已删除离线语音包");
+  }).catch(function(){ toast("删除失败，可清浏览器数据后重试"); });
+}
+function offBoxHtml(){
+  var n=vocabUniq();
+  var h='<div class="row" style="margin-top:6px">';
+  if(OFF.busy){
+    h+='<button class="btn sm" disabled>正在下载…</button>';
+  }else if(OFF.state==="ready"){
+    h+='<button class="btn sm ghost" onclick="offInstall()">重新下载</button>'+
+       '<button class="btn sm ghost" onclick="offRemove()">删除</button>';
+  }else{
+    h+='<button class="btn sm" onclick="offInstall()">下载离线包（约 2.2MB）</button>';
+  }
+  h+='</div>';
+  var st;
+  if(OFF.busy) st='正在下载语音包，保持联网，约几秒。';
+  else if(OFF.state==="ready") st='已安装：'+OFF.count+' 个单词发音，断网也能读（占用约 2.2MB，只存在本机）。';
+  else st='未安装：装了以后这 '+n+' 个词库单词彻底断网也能读。句子、文章、听力整段仍需联网。';
+  h+='<div class="tiny muted" style="margin-top:6px;line-height:1.7">'+esc(st)+'</div>';
+  return h;
+}
+function offPaint(){
+  var el=document.getElementById("offBox");
+  if(el) el.innerHTML=offBoxHtml();
+}
+
 var NET = { el:null, seq:0, unlocked:false, down:false };
 function netAudio(){
   if(!NET.el){
@@ -3282,6 +3389,18 @@ function netPlayOne(url, rate, cb){
   setTimeout(function(){ if(!done && my===NET.seq && el.readyState===0 && el.networkState===3) fin(false); }, 6000);
 }
 function netSeq(chunks, idx, rate, done){
+  if(idx>=chunks.length){ done&&done(true); return; }
+  var loc=offSrc(chunks[idx]);
+  if(loc){
+    netPlayOne(loc, rate, function(ok){
+      if(ok) netSeq(chunks, idx+1, rate, done);
+      else netNet(chunks, idx, rate, done);
+    });
+    return;
+  }
+  netNet(chunks, idx, rate, done);
+}
+function netNet(chunks, idx, rate, done){
   if(idx>=chunks.length){ done&&done(true); return; }
   var urls=netUrls(chunks[idx]), k=0;
   (function tryUrl(){
@@ -3337,7 +3456,10 @@ function speak(text, rate, cb){
   if(!t){ if(cb) cb(); return; }
   stopSpeak();
   var r=rate||DB.rate||0.92, mode=ttsMode();
-  if(mode==="local"){ localSpeak(t,r,cb); return; }
+  if(mode==="local"){
+    if(offSrc(t)){ netSay(t, r, function(ok){ if(!ok) localSpeak(t,r,cb); }); return; }
+    localSpeak(t,r,cb); return;
+  }
   netSay(t, r, function(ok){
     if(ok){ if(cb) cb(); return; }
     if(hasLocalEn()){ localSpeak(t,r,cb); return; }
@@ -4568,6 +4690,8 @@ function htmlMe(){
       '<button class="btn sm ghost" onclick="speak(\'Reading makes you smarter than you think.\')">试听一句</button>'+
       '<button class="btn sm ghost" onclick="netCheck()">检测在线语音</button>'+
     '</div>'+
+    '<div class="small muted" style="margin:12px 0 4px">离线语音包（断网也能读单词）</div>'+
+    '<div id="offBox">'+offBoxHtml()+'</div>'+
     '<div class="small muted" style="margin:10px 0 4px">发音人（仅系统语音生效）</div>'+
     '<select onchange="setVoice(this.value)">'+voiceOpts()+'</select>'+
     '<div class="tiny muted" style="margin-top:8px">'+esc(asrHint()||"录音评分可用：Chrome / Edge 效果最好，Safari 需 iOS 14.5+。")+'</div>'+
@@ -4639,12 +4763,15 @@ function ttsBtn(v,label){
   return '<button class="'+((DB.net||"online")===v?"on":"")+'" onclick="DB.net=\''+v+'\';saveDB();render();toast(\'语音来源已切换\')">'+label+'</button>';
 }
 function ttsHint(){
+  var offTip = OFF.state==="ready"
+    ? "已装离线语音包：词库里的单词优先用本机音频，断网也读得出来。"
+    : "想让词库单词彻底断网也能读，就下载下面的离线语音包。";
   if((DB.net||"online")==="local"){
     var n=enVoices().length;
-    return n? ("系统语音：用本机语音包朗读（已检测到 "+n+" 个英文发音人）。断网也能用，但音质取决于本机装的语音包。")
-            : ("系统语音：本机没检测到英文语音包，读英文很可能没声音。建议用「在线语音」。");
+    return (n? ("系统语音：用本机语音包朗读（已检测到 "+n+" 个英文发音人）。断网也能用，但音质取决于本机装的语音包。")
+            : ("系统语音：本机没检测到英文语音包，读英文很可能没声音。建议用「在线语音」。")) + offTip;
   }
-  return "在线语音：音频由网络合成，本机没装英文语音包也能正常朗读。单词走词典发音，整句走翻译发音，需联网。";
+  return "在线语音：音频由网络合成，本机没装英文语音包也能正常朗读。单词走词典发音，整句走翻译发音，需联网。" + offTip;
 }
 function netCheck(){
   if((DB.net||"online")!=="online"){ DB.net="online"; saveDB(); render(); }
@@ -5778,6 +5905,7 @@ if(typeof window!=="undefined"){
 (function(){
   try{ loadDB(); }catch(e){}
   try{ loadVoices(); }catch(e){}
+  try{ offLoad(); }catch(e){}
   var tabs=document.querySelectorAll("#tabbar .tab"), i;
   for(i=0;i<tabs.length;i++){
     tabs[i].onclick=(function(el){ return function(){ go(el.getAttribute("data-v")); }; })(tabs[i]);
