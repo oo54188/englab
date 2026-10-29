@@ -3463,6 +3463,14 @@ function speak(text, rate, cb){
   netSay(t, r, function(ok){
     if(ok){ if(cb) cb(); return; }
     if(hasLocalEn()){ localSpeak(t,r,cb); return; }
+    if(OFF && OFF.state==="ready" && OFF.count>0){
+      if(!NET.offHint){
+        NET.offHint=true;
+        var w=t.length>18?t.slice(0,18)+"…":t;
+        toast("「"+w+"」不在离线语音包内（离线只覆盖词库 "+OFF.count+" 个单词），联网后可正常朗读");
+      }
+      if(cb) cb(); return;
+    }
     if(!NET.down){ NET.down=true; toast("在线语音连不上，先检查网络；本机也没有英文语音包"); }
     if(cb) cb();
   });
