@@ -1,5 +1,5 @@
 /* EngLab Service Worker — 让应用断网也能打开 */
-const VERSION = 'englab-v1';
+const VERSION = 'englab-v2';
 const CORE = [
   './',
   './index.html',
