@@ -3883,7 +3883,7 @@ function htmlLibrary(){
      '<div class="hd"><h3>素材库</h3><div class="right"><button class="mini" onclick="libLoad(true)">刷新</button></div></div>'+
      '<div class="small muted">'+(LIB.busy && !n ? '正在取素材库索引…' : ('已收录 '+n+' 篇'+(avail?(' · 源站可选约 '+avail+' 篇'):'')+'，正文联网按需抓取'))+'</div>'+
      (LIB.from==="cache" ? '<div class="tiny" style="margin-top:8px;color:var(--amber)">离线：显示上次缓存的索引，联网后自动更新。</div>' : '')+
-     (LIB.idx && LIB.idx.updated ? '<div class="tiny muted" style="margin-top:6px">索引更新 '+esc(String(LIB.idx.updated).replace("T"," ").replace("Z",""))+' UTC · 每周自动扩容</div>' : '')+
+     (LIB.idx && LIB.idx.updated ? '<div class="tiny muted" style="margin-top:6px">索引更新 '+esc(String(LIB.idx.updated).replace("T"," ").replace("Z",""))+' UTC · 每日自动扩容 300 篇</div>' : '')+
      '</div>';
   h+='<div class="card tight">'+
      '<input id="libQ" value="'+esc(LIB.q||"")+'" placeholder="搜标题或主题词：school / health / robot" oninput="libSetQ(this.value)" '+
