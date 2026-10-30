@@ -3696,7 +3696,7 @@ var DAILY = { data:null, from:"none", busy:false, cur:"", sents:[], quiz:null };
 function dailyAgo(ts){
   if(!ts) return "";
   var d=+new Date(ts), diff=Math.round((Date.now()-d)/60000);
-  if(diff<2) return "刚更新";
+  if(diff<2) return "刚刚";
   if(diff<60) return diff+" 分钟前";
   if(diff<1440) return Math.round(diff/60)+" 小时前";
   return Math.round(diff/1440)+" 天前";
@@ -3717,7 +3717,7 @@ function dailyLoad(force){
     return r.json();
   }).then(function(j){
     if(!j || !j.items || !j.items.length) throw new Error("empty");
-    DAILY.data=j; DAILY.from="net"; DAILY.ts=Date.now(); DAILY.busy=false;
+    DAILY.data=j; DAILY.from=(navigator.onLine===false?"cache":"net"); DAILY.ts=Date.now(); DAILY.busy=false;
     try{ offIdbPut("daily", j); }catch(e){}
     dailyPaint();
     if(CURRENT==="home") render();
@@ -3740,7 +3740,7 @@ function dailyHomeLine(){
   if(!n) return "VOA Learning English、News in Levels、Breaking News English 每天更新；联网时自动取当天文章，断网看缓存。";
   var line="已存 "+n+" 篇";
   if(DAILY.from==="cache") line+="（离线缓存）";
-  else if(DAILY.ts) line+="，来源站最近更新 "+dailyAgo(DAILY.ts);
+  else if(DAILY.ts) line+="，素材抓取于 "+dailyAgo(DAILY.ts);
   var today=dk(), c=0, i;
   for(i=0;i<dailyItems().length;i++) if(dailyItems()[i].date===today) c++;
   if(c>0) line+=" · 今天 "+c+" 篇";
