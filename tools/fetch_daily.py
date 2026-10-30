@@ -255,7 +255,7 @@ if __name__ == "__main__":
         print("--- library top-up, limit =", limit, "---")
         r = subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                                          "fetch_library.py"), "--limit=" + limit],
-                           timeout=600)
+                           timeout=420)
         print("library top-up exit:", r.returncode)
     except Exception as e:
         print("library top-up skipped:", e)
