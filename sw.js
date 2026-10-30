@@ -1,5 +1,5 @@
 /* EngLab Service Worker — 让应用断网也能打开 */
-const VERSION = 'englab-v5';
+const VERSION = 'englab-v7';
 const CORE = [
   './',
   './index.html',
@@ -49,6 +49,23 @@ self.addEventListener('fetch', (e) => {
           return res;
         })
         .catch(() => caches.match('./data/daily.json'))
+    );
+    return;
+  }
+
+  // 素材库（索引 + 正文分片）：网络优先，读过的缓存下来断网可重读
+  if (url.pathname.indexOf('data/library/') >= 0) {
+    e.respondWith(
+      fetch(req)
+        .then((res) => {
+          if (res && res.status === 200) {
+            const cp = res.clone();
+            const key = req;
+            caches.open(VERSION).then((c) => c.put(key, cp));
+          }
+          return res;
+        })
+        .catch(() => caches.match(req))
     );
     return;
   }
