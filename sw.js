@@ -1,5 +1,5 @@
 /* EngLab Service Worker — 让应用断网也能打开 */
-const VERSION = 'englab-v3';
+const VERSION = 'englab-v4';
 const CORE = [
   './',
   './index.html',
@@ -7,7 +7,8 @@ const CORE = [
   './icon-192.png',
   './icon-512.png',
   './apple-touch-icon.png',
-  './favicon-32.png'
+  './favicon-32.png',
+  './data/daily.json'
 ];
 
 self.addEventListener('install', (e) => {
@@ -35,6 +36,20 @@ self.addEventListener('fetch', (e) => {
   // 离线语音包：直连网络，不进 Cache（体积大，且应用会把内容另存进 IndexedDB）
   if (url.pathname.indexOf('voice-pack.json') >= 0) {
     e.respondWith(fetch(req).catch(() => new Response('{}', { status: 503, headers: { 'Content-Type': 'application/json' } })));
+    return;
+  }
+
+  // 每日素材数据：网络优先（保证每天拿到新内容），断网回退上次缓存
+  if (url.pathname.indexOf('data/daily.json') >= 0) {
+    e.respondWith(
+      fetch(req)
+        .then((res) => {
+          const cp = res.clone();
+          caches.open(VERSION).then((c) => c.put('./data/daily.json', cp));
+          return res;
+        })
+        .catch(() => caches.match('./data/daily.json'))
+    );
     return;
   }
 
