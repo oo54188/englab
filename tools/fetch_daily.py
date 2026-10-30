@@ -247,3 +247,15 @@ def main():
 
 if __name__ == "__main__":
     main()
+    # 每日顺带做素材库增量扩容：让「素材库」的资源随天数持续增长，
+    # 不依赖单独的 workflow（失败不影响当日素材写入）
+    try:
+        import subprocess, sys
+        limit = os.environ.get("LIBRARY_LIMIT", "300")
+        print("--- library top-up, limit =", limit, "---")
+        r = subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                         "fetch_library.py"), "--limit=" + limit],
+                           timeout=600)
+        print("library top-up exit:", r.returncode)
+    except Exception as e:
+        print("library top-up skipped:", e)
