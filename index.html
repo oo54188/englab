@@ -3720,6 +3720,7 @@ function dailyLoad(force){
     DAILY.data=j; DAILY.from="net"; DAILY.ts=Date.now(); DAILY.busy=false;
     try{ offIdbPut("daily", j); }catch(e){}
     dailyPaint();
+    if(CURRENT==="home") render();
   }).catch(function(){
     offIdbGet("daily").then(function(v){
       if(v && v.items && v.items.length){ DAILY.data=v; DAILY.from="cache"; }
@@ -3729,6 +3730,7 @@ function dailyLoad(force){
     }).then(function(){
       DAILY.busy=false;
       dailyPaint();
+      if(CURRENT==="home") render();
       if(force) toast(DAILY.from==="cache" ? "连不上网络，先看上次缓存的篇目" : "暂时取不到每日素材，联网后再试一次");
     });
   });
@@ -3969,7 +3971,18 @@ function htmlHome(){
   var box=due.concat(fresh.filter(function(w){ return due.indexOf(w)<0; })).slice(0,5);
   if(box.length<5){ for(var j=0;j<VOCAB.length && box.length<5;j++){ var w=VOCAB[j].w.toLowerCase(); if(box.indexOf(w)<0) box.push(w); } }
 
-  var h='<div class="card">'+
+    if(!DAILY.data && !DAILY.busy) dailyLoad(false);
+  var dn=dailyItems().length, dtoday=dk(), dread=0, dnew=0, di;
+  for(di=0;di<dn;di++){ if(dailyItems()[di].date===dtoday) dnew++; if(!dailyIsRead(dailyItems()[di].id)) dread++; }
+  var dcard='<div class="card dailyCard" onclick="go(\'daily\')" style="cursor:pointer">'+
+    '<div class="hd"><h3>每日素材</h3><div class="right"><span class="chip">'+(dn?(dnew?('今天 '+dnew+' 篇'):('已存 '+dn+' 篇')):'待联网')+'</span></div></div>'+
+    '<div class="small muted">'+esc(dailyHomeLine())+'</div>'+
+    (dn?('<div class="small mt8">未读 '+dread+' 篇 · 点开读一篇，生词自动进词网</div>'):'')+
+    '<div class="row wrap" style="margin-top:10px">'+
+      '<button class="btn sm" onclick="event.stopPropagation();go(\'daily\')">打开今日素材</button>'+
+      (dn?'<button class="btn sm ghost" onclick="event.stopPropagation();dailyPickRandom()">随机读一篇</button>':'')+
+    '</div></div>';
+  var h=dcard+'<div class="card">'+
     '<div class="hd"><h3>今天 · 五步闭环</h3><div class="right"><span class="chip">'+done+'/5</span></div></div>'+
     '<div class="bar"><i style="width:'+pct+'%"></i></div>'+
     '<div class="small muted mt8">听、读、看负责输入，说、写负责输出。五步都过一遍，一个词才会在四个方向上都留痕。</div>';
