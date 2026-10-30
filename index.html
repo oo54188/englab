@@ -3102,7 +3102,7 @@ var SHADOW = [
 /* ==== el8_state.js ==== */
 /* ===== 状态、存储、语音、评分、通用 UI ===== */
 var LS_KEY = "englab_v2";
-var DB = { srs:{}, days:{}, use:{}, goal:20, rate:0.92, voice:"", start:"", net:"online", off:0, daily:{read:{}} };
+var DB = { srs:{}, days:{}, use:{}, goal:20, rate:0.92, voice:"", acc:"us", wake:1, start:"", net:"online", off:0, daily:{read:{}} };
 function useWord(w, kind){
   var k=String(w||"").toLowerCase(); if(!k) return;
   if(!DB.use) DB.use={};
@@ -3134,6 +3134,8 @@ function loadDB(){
       DB.srs = o.srs||{}; DB.days = o.days||{}; DB.use = o.use||{}; DB.mat = o.mat||{};
       DB.goal = o.goal||20; DB.rate = o.rate||0.92; DB.voice = o.voice||"";
       DB.net = (o.net==="local"||o.net==="online") ? o.net : "online";
+      DB.acc = (o.acc==="uk") ? "uk" : "us";
+      DB.wake = (o.wake===0) ? 0 : 1;
       DB.off = o.off?1:0;
       DB.start = o.start||"";
       DB.wd = o.wd||{}; DB.paste = o.paste||[];
@@ -3352,8 +3354,8 @@ function offBoxHtml(){
   h+='</div>';
   var st;
   if(OFF.busy) st='正在下载语音包，保持联网，约几秒。';
-  else if(OFF.state==="ready") st='已安装：'+OFF.count+' 个单词发音，断网也能读（占用约 2.2MB，只存在本机）。';
-  else st='未安装：装了以后这 '+n+' 个词库单词彻底断网也能读。句子、文章、听力整段仍需联网。';
+  else if(OFF.state==="ready") st='已安装：'+OFF.count+' 个单词发音，断网也能读（占用约 2.2MB，只存在本机）。离线包音色固定，不随上面的口音切换变化。';
+  else st='未安装：装了以后这 '+n+' 个词库单词彻底断网也能读。句子、文章、听力整段仍需联网；离线包音色固定，口音切换只影响在线朗读。';
   h+='<div class="tiny muted" style="margin-top:6px;line-height:1.7">'+esc(st)+'</div>';
   return h;
 }
@@ -3362,7 +3364,7 @@ function offPaint(){
   if(el) el.innerHTML=offBoxHtml();
 }
 
-var NET = { el:null, seq:0, unlocked:false, down:false };
+var NET = { el:null, seq:0, unlocked:false, down:false, playing:false, msBound:false };
 function netAudio(){
   if(!NET.el){
     NET.el = new Audio();
@@ -3377,12 +3379,66 @@ function isShortTerm(t){
   if(/[.!?;]/.test(s)) return false;
   return s.split(/\s+/).filter(Boolean).length<=4;
 }
+/* 朗读口音：美音(en / 有道 type=2) 或 英音(uk / 有道 type=1)。
+   单词走词典发音，整句只有百度翻译接口可用（有道整句会 500），故整句用 lan=en / lan=uk。 */
+function accUk(){ return DB.acc==="uk"; }
 function netUrls(t){
-  var q=encodeURIComponent(String(t).trim()), out=[];
-  if(isShortTerm(t)) out.push("https://dict.youdao.com/dictvoice?audio="+q+"&type=2");
-  out.push("https://fanyi.baidu.com/gettts?lan=en&text="+q+"&spd=3&source=web");
-  if(!isShortTerm(t)) out.push("https://dict.youdao.com/dictvoice?audio="+q+"&type=2");
+  var q=encodeURIComponent(String(t).trim()), out=[], uk=accUk();
+  if(isShortTerm(t)){
+    out.push("https://dict.youdao.com/dictvoice?audio="+q+"&type="+(uk?1:2));
+    out.push("https://fanyi.baidu.com/gettts?lan="+(uk?"uk":"en")+"&text="+q+"&spd=3&source=web");
+    out.push("https://dict.youdao.com/dictvoice?audio="+q+"&type="+(uk?2:1));
+  } else {
+    out.push("https://fanyi.baidu.com/gettts?lan="+(uk?"uk":"en")+"&text="+q+"&spd=3&source=web");
+    out.push("https://fanyi.baidu.com/gettts?lan="+(uk?"en":"uk")+"&text="+q+"&spd=3&source=web");
+  }
   return out;
+}
+/* --- 屏幕常亮：安卓息屏后浏览器会挂起 JS，朗读链会断 --- */
+var SCREEN = { lock:null, on:false };
+function wakeOn(){
+  if(!DB.wake) return;
+  if(!(navigator.wakeLock && navigator.wakeLock.request)) return;
+  if(SCREEN.lock) return;
+  try{
+    navigator.wakeLock.request("screen").then(function(l){
+      SCREEN.lock=l; SCREEN.on=true;
+      l.addEventListener("release", function(){ SCREEN.lock=null; SCREEN.on=false; });
+    }).catch(function(){});
+  }catch(e){}
+}
+function wakeOff(){
+  if(SCREEN.lock){ try{ SCREEN.lock.release(); }catch(e){} }
+  SCREEN.lock=null; SCREEN.on=false;
+}
+document.addEventListener("visibilitychange", function(){
+  if(document.visibilityState==="visible" && NET.playing) wakeOn();
+});
+/* --- 锁屏媒体会话：让系统把朗读认成"正在播放媒体"，锁屏不被冻结，并出现控制条 --- */
+function mediaSet(text){
+  if(!("mediaSession" in navigator)) return;
+  try{
+    var t=String(text==null?"":text).replace(/\s+/g," ").trim();
+    if(t.length>60) t=t.slice(0,60)+"\u2026";
+    if(window.MediaMetadata){
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: t||"EngLab \u6717\u8bfb",
+        artist: "EngLab \u00b7 \u82f1\u8bed\u5b9e\u9a8c\u5ba4",
+        album: accUk()?"\u82f1\u97f3\u6717\u8bfb":"\u7f8e\u97f3\u6717\u8bfb",
+        artwork: [{ src:"icon-192.png", sizes:"192x192", type:"image/png" }]
+      });
+    }
+    navigator.mediaSession.playbackState = "playing";
+    if(!NET.msBound){
+      NET.msBound=true;
+      try{ navigator.mediaSession.setActionHandler("pause", function(){ stopSpeak(); }); }catch(e){}
+      try{ navigator.mediaSession.setActionHandler("stop",  function(){ stopSpeak(); }); }catch(e){}
+    }
+  }catch(e){}
+}
+function mediaOff(){
+  if(!("mediaSession" in navigator)) return;
+  try{ navigator.mediaSession.playbackState = "none"; }catch(e){}
 }
 function ttsChunks(t){
   t=String(t==null?"":t).replace(/\s+/g," ").trim();
@@ -3408,6 +3464,7 @@ function netPlayOne(url, rate, cb){
   el.onerror=function(){ fin(false); };
   try{ el.pause(); }catch(e){}
   el.src=url;
+  NET.playing=true;
   try{ el.defaultPlaybackRate=el.playbackRate=rate||1; }catch(e){}
   try{ el.preservesPitch=true; el.webkitPreservesPitch=true; el.mozPreservesPitch=true; }catch(e){}
   var p=el.play();
@@ -3440,7 +3497,14 @@ function netNet(chunks, idx, rate, done){
 function netSay(text, rate, cb){
   var cs=ttsChunks(text);
   if(!cs.length){ cb&&cb(); return; }
-  netSeq(cs, 0, rate||DB.rate||0.92, function(ok){ if(cb) cb(ok); });
+  wakeOn();
+  mediaSet(text);
+  netSeq(cs, 0, rate||DB.rate||0.92, function(ok){
+    NET.playing=false;
+    wakeOff();
+    mediaOff();
+    if(cb) cb(ok);
+  });
 }
 /* iOS/Safari 要求音频首次播放由用户手势触发：首屏第一次点击时悄悄解锁一个静音音频 */
 function unlockTTS(){
@@ -3475,6 +3539,9 @@ function hasLocalEn(){ return enVoices().length>0; }
 
 function stopSpeak(){
   netStop();
+  NET.playing=false;
+  wakeOff();
+  mediaOff();
   if(window.speechSynthesis) speechSynthesis.cancel();
 }
 function speak(text, rate, cb){
@@ -5005,6 +5072,10 @@ function htmlMe(){
   h+='<div class="tiny muted" style="margin-top:6px">应用本身离线可用；这些链接需要联网。没有收录的站点一律不列，避免给你假资源。</div></div>';
 
   h+='<div class="card tight"><div class="hd"><h3>设置</h3></div>'+
+    '<div class="small muted" style="margin:8px 0 4px">朗读口音（单词与整句都跟随）</div>'+
+    '<div class="seg">'+accBtn("us","美音")+accBtn("uk","英音")+'</div>'+
+    '<div class="small muted" style="margin:10px 0 4px">朗读时保持屏幕常亮（安卓息屏会停读）</div>'+
+    '<div class="seg">'+wakeBtn(1,"常亮开")+wakeBtn(0,"关闭")+'</div>'+
     '<div class="small muted" style="margin:8px 0 4px">朗读语速</div>'+
     '<div class="seg">'+rateBtn(0.8,"0.8 慢")+rateBtn(0.92,"0.92 标准")+rateBtn(1.05,"1.05 快")+'</div>'+
     '<div class="small muted" style="margin:10px 0 4px">每日词量目标</div>'+
@@ -5084,6 +5155,23 @@ function heatHtml(){
 }
 function rateBtn(v,label){
   return '<button class="'+(Math.abs((DB.rate||0.92)-v)<0.01?"on":"")+'" onclick="DB.rate='+v+';saveDB();render();toast(\'语速已改\')">'+label+'</button>';
+}
+function accBtn(v,label){
+  return '<button class="'+((DB.acc||"us")===v?"on":"")+'" onclick="setAcc(\''+v+'\')">'+label+'</button>';
+}
+function setAcc(v){
+  DB.acc = (v==="uk")?"uk":"us"; saveDB(); render();
+  toast(DB.acc==="uk"?"已切换到英音":"已切换到美音");
+  speak(DB.acc==="uk"?"Schedule the water. Schedule the water.":"Schedule the water. Schedule the water.");
+}
+function wakeBtn(v,label){
+  return '<button class="'+(((DB.wake?1:0)===v)?"on":"")+'" onclick="setWake('+v+')">'+label+'</button>';
+}
+function setWake(v){
+  DB.wake = v?1:0; saveDB();
+  if(!DB.wake) wakeOff(); else wakeOn();
+  render();
+  toast(DB.wake?"朗读时屏幕保持常亮":"已关闭常亮（息屏可能停读）");
 }
 function ttsBtn(v,label){
   return '<button class="'+((DB.net||"online")===v?"on":"")+'" onclick="DB.net=\''+v+'\';saveDB();render();toast(\'语音来源已切换\')">'+label+'</button>';
@@ -5175,7 +5263,7 @@ function exportCSV(){
 }
 function resetAll(){
   if(!confirm("将清空这台设备上的全部学习记录（词网掌握度、四向计数、打卡与草稿）。无法恢复，建议先导出。继续吗？")) return;
-  DB={ srs:{}, days:{}, use:{}, mat:{}, wd:{}, goal:20, rate:0.92, voice:"", start:dk() };
+  DB={ srs:{}, days:{}, use:{}, mat:{}, wd:{}, goal:20, rate:0.92, voice:"", acc:"us", wake:1, start:dk() };
   saveDB(); render(); toast("已清空");
 }
 
