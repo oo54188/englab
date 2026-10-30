@@ -428,6 +428,29 @@ body.bgnight .toast{background:#243028;color:#DDE6D8}
 .rcbox{font-size:12px;line-height:1.65;margin-top:8px;background:var(--green-l2);border-left:3px solid var(--green);border-radius:8px;padding:8px 10px;color:var(--ink2)}
 .rcbox b{color:var(--green-d)}
 @media (max-width:360px){ .cfrow{grid-template-columns:1fr} }
+
+/* ---------- 每日素材 ---------- */
+.dl-day{font-size:11.5px;font-weight:800;color:var(--muted);letter-spacing:.4px;margin:16px 2px 8px}
+.dl-item{background:var(--card);border:1px solid var(--line);border-radius:var(--r2);padding:12px 13px;margin-bottom:9px;cursor:pointer;box-shadow:var(--sh2)}
+.dl-item:active{transform:scale(.995)}
+.dl-top{display:flex;align-items:center;gap:6px;margin-bottom:6px;flex-wrap:wrap}
+.dl-src{font-size:10.5px;font-weight:800;color:var(--green-d);background:var(--green-l);border-radius:6px;padding:2px 6px;letter-spacing:.2px}
+.dl-lv{font-size:10.5px;font-weight:800;color:var(--amber);background:var(--amber-l);border-radius:6px;padding:2px 6px}
+.dl-meta{font-size:10.5px;color:var(--muted);font-weight:650}
+.dl-t{font-size:15px;font-weight:750;line-height:1.35;letter-spacing:-.15px;color:var(--ink)}
+.dl-sub{font-size:11.5px;color:var(--muted);margin-top:5px}
+.dl-body{font-size:16.5px;line-height:1.9;color:var(--ink)}
+.dl-s{border-radius:4px;padding:1px 0}
+.dl-s:active{background:var(--green-l)}
+.dl-w{color:var(--green-d);border-bottom:1px dashed var(--green);font-weight:650}
+.dl-key{display:flex;flex-wrap:wrap;gap:7px}
+.dl-k{border:1px solid var(--line);background:#fff;border-radius:9px;padding:6px 9px;font-size:12.5px;font-weight:700;color:var(--ink);cursor:pointer;text-decoration:none;display:inline-block}
+.dl-k i{font-style:normal;font-weight:600;color:var(--muted);font-size:11px;margin-left:5px}
+.dl-q{border:1px solid var(--line);border-radius:var(--r2);padding:12px;margin-bottom:9px}
+.dl-q .qt{font-size:14px;font-weight:750;margin-bottom:8px}
+.dl-op{display:block;width:100%;text-align:left;border:1px solid var(--line);background:#fff;border-radius:10px;padding:9px 11px;margin-bottom:6px;font-size:13px;font-weight:650;cursor:pointer;color:var(--ink)}
+.dl-op.ok{border-color:var(--green);background:var(--green-l);color:var(--green-d)}
+.dl-op.no{border-color:var(--red);background:var(--red-l);color:var(--red)}
 </style>
 </head>
 <body>
@@ -445,6 +468,8 @@ body.bgnight .toast{background:#243028;color:#DDE6D8}
     <section class="view" id="view-trans"></section>
     <section class="view" id="view-snack"></section>
     <section class="view" id="view-me"></section>
+    <section class="view" id="view-daily"></section>
+    <section class="view" id="view-dailyread"></section>
   </main>
   <nav class="tabbar" id="tabbar">
     <button class="tab on" data-v="home"><span class="ic"><svg viewBox="0 0 24 24"><path d="M3.5 10.6 12 3.4l8.5 7.2"/><path d="M5.6 9.6V20.6h12.8V9.6"/></svg></span>今天</button>
@@ -3077,7 +3102,7 @@ var SHADOW = [
 /* ==== el8_state.js ==== */
 /* ===== 状态、存储、语音、评分、通用 UI ===== */
 var LS_KEY = "englab_v2";
-var DB = { srs:{}, days:{}, use:{}, goal:20, rate:0.92, voice:"", start:"", net:"online", off:0 };
+var DB = { srs:{}, days:{}, use:{}, goal:20, rate:0.92, voice:"", start:"", net:"online", off:0, daily:{read:{}} };
 function useWord(w, kind){
   var k=String(w||"").toLowerCase(); if(!k) return;
   if(!DB.use) DB.use={};
@@ -3113,6 +3138,7 @@ function loadDB(){
       DB.start = o.start||"";
       DB.wd = o.wd||{}; DB.paste = o.paste||[];
       DB.rec = o.rec||{}; DB.wait = o.wait||{};
+      DB.daily = o.daily||{read:{}};
     }
     if(!DB.start){ DB.start = dk(); saveDB(); }
   }catch(e){}
@@ -3647,6 +3673,8 @@ function render(arg){
   else if(CURRENT==="trans") el.innerHTML = htmlInterp(arg);
   else if(CURRENT==="snack") el.innerHTML = backBar("碎片时间","home") + htmlSnack(arg);
   else if(CURRENT==="me") el.innerHTML = htmlMe();
+  else if(CURRENT==="daily") el.innerHTML = htmlDaily();
+  else if(CURRENT==="dailyread") el.innerHTML = htmlDailyRead();
   var chip=document.getElementById("streakChip");
   if(chip) chip.textContent = "连续 "+streak()+" 天";
 }
@@ -3662,6 +3690,276 @@ function stepStat(id){
   if(id==="write") return m.write||0;
   return m[id]||0;
 }
+/* ================= 每日素材：外部官方源每日抓取 ================= */
+var DAILY = { data:null, from:"none", busy:false, cur:"", sents:[], quiz:null };
+
+function dailyAgo(ts){
+  if(!ts) return "";
+  var d=+new Date(ts), diff=Math.round((Date.now()-d)/60000);
+  if(diff<2) return "刚更新";
+  if(diff<60) return diff+" 分钟前";
+  if(diff<1440) return Math.round(diff/60)+" 小时前";
+  return Math.round(diff/1440)+" 天前";
+}
+function dailyItems(){ return (DAILY.data && DAILY.data.items) || []; }
+function dailyById(id){ var a=dailyItems(),i; for(i=0;i<a.length;i++) if(a[i].id===id) return a[i]; return null; }
+function dailyIsRead(id){ return !!(DB.daily && DB.daily.read && DB.daily.read[id]); }
+
+function dailyPaint(){
+  if(CURRENT==="daily" || CURRENT==="dailyread") render();
+}
+function dailyLoad(force){
+  if(DAILY.busy) return;
+  if(DAILY.data && !force){ dailyPaint(); return; }
+  DAILY.busy=true;
+  fetch("./data/daily.json", {cache:"no-store"}).then(function(r){
+    if(!r.ok) throw new Error("HTTP "+r.status);
+    return r.json();
+  }).then(function(j){
+    if(!j || !j.items || !j.items.length) throw new Error("empty");
+    DAILY.data=j; DAILY.from="net"; DAILY.ts=Date.now(); DAILY.busy=false;
+    try{ offIdbPut("daily", j); }catch(e){}
+    dailyPaint();
+  }).catch(function(){
+    offIdbGet("daily").then(function(v){
+      if(v && v.items && v.items.length){ DAILY.data=v; DAILY.from="cache"; }
+      else { DAILY.data={items:[],updated:"",generated:""}; DAILY.from="none"; }
+    }).catch(function(){
+      DAILY.data={items:[],updated:"",generated:""}; DAILY.from="none";
+    }).then(function(){
+      DAILY.busy=false;
+      dailyPaint();
+      if(force) toast(DAILY.from==="cache" ? "连不上网络，先看上次缓存的篇目" : "暂时取不到每日素材，联网后再试一次");
+    });
+  });
+}
+function dailyHomeLine(){
+  var n=dailyItems().length;
+  if(!n) return "VOA Learning English、News in Levels、Breaking News English 每天更新；联网时自动取当天文章，断网看缓存。";
+  var line="已存 "+n+" 篇";
+  if(DAILY.from==="cache") line+="（离线缓存）";
+  else if(DAILY.ts) line+="，来源站最近更新 "+dailyAgo(DAILY.ts);
+  var today=dk(), c=0, i;
+  for(i=0;i<dailyItems().length;i++) if(dailyItems()[i].date===today) c++;
+  if(c>0) line+=" · 今天 "+c+" 篇";
+  return line;
+}
+function dailyPickRandom(){
+  var a=dailyItems(), pool=[], i;
+  for(i=0;i<a.length;i++) if(!dailyIsRead(a[i].id)) pool.push(a[i]);
+  if(!pool.length) pool=a;
+  if(!pool.length){ toast("素材还没取到，联网后再试"); return; }
+  dailyOpen(pool[Math.floor(Math.random()*pool.length)].id);
+}
+function dailyOpen(id){
+  if(!dailyById(id)){ toast("这篇没在缓存里了"); return; }
+  DAILY.cur=id; DAILY.quiz=null; DAILY.sents=[];
+  go("dailyread");
+}
+function dailyRate(){
+  var rs=[0.75,0.85,0.95,1.05], cur=DB.rate||0.92, i, n=rs[0];
+  for(i=0;i<rs.length;i++) if(Math.abs(rs[i]-cur)<0.03){ n=rs[(i+1)%rs.length]; break; }
+  DB.rate=n; saveDB();
+  toast("朗读语速 "+n+"×");
+  render();
+}
+function dailyRich(s){
+  return esc(s).replace(/([A-Za-z][A-Za-z'-]+)/g, function(m){
+    var k=m.toLowerCase();
+    if(typeof VOCAB_BY_W!=="undefined" && VOCAB_BY_W[k]){
+      return '<b class="dl-w" onclick="event.stopPropagation();openWord(\''+k.replace(/'/g,"")+'\')">'+m+'</b>';
+    }
+    return m;
+  });
+}
+function dailySplit(t){
+  var raw=String(t||"").match(/[^.!?]+[.!?]*/g) || [];
+  var out=[], i;
+  for(i=0;i<raw.length;i++){ var x=raw[i].trim(); if(x) out.push(x); }
+  return out;
+}
+function dailySay(i){
+  var s=DAILY.sents[i];
+  if(s) speak(s, null, null);
+}
+function dailyPlayAll(){
+  if(!DAILY.sents.length) return;
+  toast("开始朗读，点任意一句可以跳到那句");
+  speakSeq(DAILY.sents, 220, null);
+}
+function dailyMarkRead(){
+  var it=dailyById(DAILY.cur); if(!it) return;
+  if(!DB.daily) DB.daily={read:{}};
+  if(!DB.daily.read) DB.daily.read={};
+  DB.daily.read[it.id]=Date.now();
+  saveDB(); touch("read", 1);
+  var ks=it.key||[], i, put=0;
+  for(i=0;i<ks.length;i++){ if(VOCAB_BY_W[ks[i]]){ useWord(ks[i],"read"); put++; } }
+  toast("记了一笔阅读"+(put?"，"+put+" 个词进了词网回流":""));
+  render();
+}
+function dailyQuizStart(){
+  var it=dailyById(DAILY.cur); if(!it) return;
+  var pool=[], i, j;
+  for(i=0;i<(it.key||[]).length;i++){
+    var v=VOCAB_BY_W[it.key[i]];
+    if(v && v.cn) pool.push(v);
+  }
+  if(pool.length<3){ toast("这篇的词库内词不够出题，先用上方逐句听读"); return; }
+  pool=pool.slice(0,5);
+  var qs=[];
+  for(i=0;i<pool.length;i++){
+    var ans=pool[i], opts=[ans.cn], guard=0;
+    while(opts.length<4 && guard++<60){
+      var rv=VOCAB[Math.floor(Math.random()*VOCAB.length)];
+      if(!rv || !rv.cn || rv.cn===ans.cn) continue;
+      if(opts.indexOf(rv.cn)>=0) continue;
+      opts.push(rv.cn);
+    }
+    for(j=opts.length-1;j>0;j--){ var k=Math.floor(Math.random()*(j+1)), t=opts[j]; opts[j]=opts[k]; opts[k]=t; }
+    qs.push({ w:ans.w, cn:ans.cn, opts:opts, pick:"", ok:false });
+  }
+  DAILY.quiz=qs;
+  render();
+}
+function dailyQuizPick(qi, oi){
+  var q=DAILY.quiz && DAILY.quiz[qi]; if(!q || q.pick!=="") return;
+  q.pick=q.opts[oi]; q.ok=(q.opts[oi]===q.cn);
+  if(q.ok){ useWord(q.w,"read"); touch("read",1); }
+  saveDB(); render();
+}
+
+function htmlDaily(){
+  if(!DAILY.data && !DAILY.busy) dailyLoad(false);
+  var h=backBar("每日素材","home");
+  var n=dailyItems().length;
+  if(DAILY.busy && !n){
+    return h+'<div class="card"><div class="small muted">正在取今天的素材…</div></div>';
+  }
+  h+='<div class="card tight">'+
+     '<div class="hd"><h3>每日素材</h3><div class="right"><button class="mini" onclick="dailyLoad(true)">刷新</button></div></div>'+
+     '<div class="small muted">'+esc(dailyHomeLine())+'</div>';
+  if(DAILY.from==="cache") h+='<div class="tiny" style="margin-top:8px;color:var(--amber)">离线模式：显示上次缓存，联网后自动换成当天的。</div>';
+  if(DAILY.from==="net" && DAILY.data && DAILY.data.updated) h+='<div class="tiny muted" style="margin-top:6px">抓取时间 '+esc(DAILY.data.updated.replace("T"," ").replace("Z",""))+' UTC · 由 GitHub Actions 每天定时更新</div>';
+  h+='</div>';
+  if(!n){
+    h+='<div class="card"><div class="small muted">暂时没有素材。素材由每天定时抓取生成，第一次抓取完成后再打开这里。也可以先看已有的听力/阅读模块。</div>'+
+       '<div class="row wrap" style="margin-top:10px"><button class="btn sm ghost" onclick="go(\'input\')">去听力</button>'+
+       '<button class="btn sm ghost" onclick="go(\'vocab\')">去词网</button></div></div>';
+    return h;
+  }
+  var last="", i;
+  for(i=0;i<dailyItems().length;i++){
+    var it=dailyItems()[i];
+    if(it.date!==last){
+      last=it.date;
+      var tag=(last===dk())?"今天 · "+last:last;
+      h+='<div class="dl-day">'+esc(tag)+'</div>';
+    }
+    h+='<div class="dl-item" onclick="dailyOpen(\''+it.id+'\')">'+
+       '<div class="dl-top">'+
+         '<span class="dl-src">'+esc(it.src)+'</span>'+
+         '<span class="dl-lv">L'+it.level+'</span>'+
+         (it.audio?'<span class="dl-meta">有音频</span>':'<span class="dl-meta">朗读</span>')+
+         '<span class="dl-meta">'+it.words+' 词</span>'+
+         (dailyIsRead(it.id)?'<span class="dl-meta" style="color:var(--green-d)">✓ 已读</span>':'')+
+       '</div>'+
+       '<div class="dl-t">'+esc(it.title)+'</div>'+
+       '<div class="dl-sub">'+(it.key&&it.key.length?('重点词 '+it.key.length+' 个'):'点开听读')+'</div>'+
+       '</div>';
+  }
+  h+='<div class="tiny muted" style="margin:12px 2px 24px;line-height:1.7">素材来自各站每日更新的公开学习文章：'+
+     '<a href="https://www.newsinlevels.com/" target="_blank" rel="noopener">News in Levels</a>、'+
+     '<a href="https://breakingnewsenglish.com/" target="_blank" rel="noopener">Breaking News English</a>、'+
+     '<a href="https://learningenglish.voanews.com/" target="_blank" rel="noopener">VOA Learning English</a>。'+
+     '正文与音频版权归原站，这里只做学习用的摘要与生词整理。</div>';
+  return h;
+}
+
+function htmlDailyRead(){
+  var it=dailyById(DAILY.cur);
+  if(!it){
+    if(!DAILY.data && !DAILY.busy) dailyLoad(false);
+    return backBar("每日素材","daily")+'<div class="card"><div class="small muted">这篇不在缓存里，回列表重新选一篇。</div></div>';
+  }
+  if(!DAILY.sents.length || DAILY.sentFor!==it.id){ DAILY.sents=dailySplit(it.text); DAILY.sentFor=it.id; }
+  var h=backBar("每日素材","daily");
+  /* 同标题不同难度切换 */
+  var sibs=[], i;
+  for(i=0;i<dailyItems().length;i++){
+    var o=dailyItems()[i];
+    if(o.title===it.title) sibs.push(o);
+  }
+  sibs.sort(function(a,b){ return a.level-b.level; });
+  h+='<div class="card tight">'+
+     '<div class="dl-top" style="margin-bottom:8px"><span class="dl-src">'+esc(it.src)+'</span>'+
+     '<span class="dl-lv">L'+it.level+'</span><span class="dl-meta">'+esc(it.date)+' · '+it.words+' 词</span></div>'+
+     '<div class="dl-t" style="font-size:18px;line-height:1.4">'+esc(it.title)+'</div>';
+  if(sibs.length>1){
+    h+='<div class="row wrap" style="margin-top:10px;gap:6px">';
+    for(i=0;i<sibs.length;i++){
+      var s=sibs[i];
+      h+='<button class="chip'+(s.id===it.id?' act':'')+'" onclick="dailyOpen(\''+s.id+'\')">难度 L'+s.level+'</button>';
+    }
+    h+='</div>';
+  }
+  h+='</div>';
+
+  /* 工具栏 */
+  h+='<div class="card tight">'+
+     '<div class="row wrap" style="gap:7px">'+
+     '<button class="btn sm" onclick="dailyPlayAll()">朗读全文</button>'+
+     '<button class="btn sm ghost" onclick="stopSpeak()">停</button>'+
+     '<button class="btn sm ghost" onclick="dailyRate()">语速 '+((DB.rate||0.92))+'×</button>'+
+     '<button class="btn sm ghost" onclick="dailyQuizStart()">生词小测</button>'+
+     '<button class="btn sm ghost" onclick="dailyMarkRead()">'+(dailyIsRead(it.id)?'已读过':'标记已读')+'</button>'+
+     '<a class="btn sm ghost" href="'+esc(it.url)+'" target="_blank" rel="noopener">原站</a>'+
+     '</div>';
+  if(it.audio) h+='<audio controls preload="none" style="width:100%;margin-top:10px" src="'+esc(it.audio)+'"></audio>'+
+     '<div class="tiny muted" style="margin-top:6px">原站音频，联网可播；断网用上面的 TTS 朗读。</div>';
+  h+='</div>';
+
+  /* 正文 */
+  h+='<div class="card"><div class="dl-body">';
+  for(i=0;i<DAILY.sents.length;i++){
+    h+='<span class="dl-s" onclick="dailySay('+i+')">'+dailyRich(DAILY.sents[i])+' </span>';
+  }
+  h+='</div><div class="tiny muted" style="margin-top:12px">绿色虚线词在你的词库里，点开看释义；点句子单独朗读。</div></div>';
+
+  /* 生词 */
+  if(it.key && it.key.length){
+    h+='<div class="card"><div class="hd"><h3>这篇的重点词</h3><div class="right"><span class="tag">'+it.key.length+'</span></div></div><div class="dl-key">';
+    for(i=0;i<it.key.length;i++){
+      var k=it.key[i], v=VOCAB_BY_W[k];
+      if(v){
+        h+='<button class="dl-k" onclick="openWord(\''+v.w.replace(/'/g,"")+'\')">'+esc(v.w)+'<i>'+esc(v.cn)+'</i></button>';
+      }else{
+        h+='<a class="dl-k" href="https://dict.youdao.com/result?word='+encodeURIComponent(k)+'&lang=en" target="_blank" rel="noopener">'+esc(k)+'<i>查词</i></a>';
+      }
+    }
+    h+='</div><div class="tiny muted" style="margin-top:10px">弧外的词不在你词库里，点了去查词；词库内的点开可以评档，答对就出词网。</div></div>';
+  }
+
+  /* 小测 */
+  if(DAILY.quiz && DAILY.quiz.length){
+    h+='<div class="card"><div class="hd"><h3>生词小测</h3><div class="right"><button class="mini" onclick="DAILY.quiz=null;render()">收起</button></div></div>';
+    for(i=0;i<DAILY.quiz.length;i++){
+      var q=DAILY.quiz[i], j;
+      h+='<div class="dl-q"><div class="qt">'+esc(q.w)+'</div>';
+      for(j=0;j<q.opts.length;j++){
+        var cls="dl-op";
+        if(q.pick!==""){ if(q.opts[j]===q.cn) cls+=" ok"; else if(q.opts[j]===q.pick) cls+=" no"; }
+        h+='<button class="'+cls+'" onclick="dailyQuizPick('+i+','+j+')">'+esc(q.opts[j])+'</button>';
+      }
+      if(q.pick!=="") h+='<div class="tiny" style="margin-top:4px;color:'+(q.ok?"var(--green-d)":"var(--red)")+'">'+(q.ok?"对，已记一次使用":"正确答案："+esc(q.cn))+'</div>';
+      h+='</div>';
+    }
+    h+='</div>';
+  }
+  h+='<div style="height:20px"></div>';
+  return h;
+}
+
 function htmlHome(){
   var t=todayRec(), done=0, i;
   for(i=0;i<STEPS.length;i++) if(stepStat(STEPS[i].id)>0) done++;
@@ -3714,6 +4012,13 @@ function htmlHome(){
        '<span class="lr">'+(srsOf(v.w.toLowerCase()).lv||0)+'/7</span></div>';
   }
   h+='</div>';
+
+  h+='<div class="card tight">'+
+    '<div class="hd"><h3>每日素材</h3><div class="right"><button class="mini" onclick="dailyLoad(true);go(\'daily\')">刷新 ›</button></div></div>'+
+    '<div class="small muted" style="margin-bottom:9px">'+esc(dailyHomeLine())+'</div>'+
+    '<div class="row wrap"><button class="btn sm" onclick="go(\'daily\')">看今天的文章</button>'+
+    '<button class="btn sm ghost" onclick="dailyPickRandom()">随手一篇 ›</button></div>'+
+    '<div class="tiny muted" style="margin-top:8px">当天文章来自 VOA / News in Levels / Breaking News English，抓下来后配好重点词与逐句朗读。</div></div>';
 
   if(typeof recCardHTML==="function") h+=recCardHTML();
 
