@@ -470,6 +470,7 @@ body.bgnight .toast{background:#243028;color:#DDE6D8}
     <section class="view" id="view-me"></section>
     <section class="view" id="view-daily"></section>
     <section class="view" id="view-dailyread"></section>
+    <section class="view" id="view-library"></section>
   </main>
   <nav class="tabbar" id="tabbar">
     <button class="tab on" data-v="home"><span class="ic"><svg viewBox="0 0 24 24"><path d="M3.5 10.6 12 3.4l8.5 7.2"/><path d="M5.6 9.6V20.6h12.8V9.6"/></svg></span>今天</button>
@@ -3742,6 +3743,7 @@ function render(arg){
   else if(CURRENT==="me") el.innerHTML = htmlMe();
   else if(CURRENT==="daily") el.innerHTML = htmlDaily();
   else if(CURRENT==="dailyread") el.innerHTML = htmlDailyRead();
+  else if(CURRENT==="library") el.innerHTML = htmlLibrary();
   var chip=document.getElementById("streakChip");
   if(chip) chip.textContent = "连续 "+streak()+" 天";
 }
@@ -3760,6 +3762,147 @@ function stepStat(id){
 /* ================= 每日素材：外部官方源每日抓取 ================= */
 var DAILY = { data:null, from:"none", busy:false, cur:"", sents:[], quiz:null };
 
+/* ================= 素材库：联网全量真实素材（不限于每天几篇） ================= */
+var LIB = { idx:null, from:"none", busy:false, q:"", lv:0, show:30, bodies:{}, shardLoad:{}, shardPend:{}, fetching:"" };
+
+function libItems(){ return (LIB.idx && LIB.idx.items) || []; }
+function libClean(t){
+  t=String(t||"");
+  t=t.replace(/^\s*id="[^"]*">/,'').replace(/\s*<[a-zA-Z\/][^>]*>\s*$/,'').replace(/\s*<[a-zA-Z\/][^>]*$/,'')
+     .replace(/^\s*(?:class|id)="[^"]*"\s*>/,'').replace(/^\s*\d{1,2}-\d{1,2}-\d{4}(?:\s+\d{1,2}:\d{2})?\s*/,'')
+     .replace(/The post [\s\S]*? appeared first on [\s\S]*?$/,'').replace(/\s+/g,' ').trim();
+  return t;
+}
+function libById(id){
+  var a=libItems(), i, it=null, k;
+  for(i=0;i<a.length;i++){ if(a[i].id===id){ it=a[i]; break; } }
+  if(!it) return null;
+  var m={}, k, b=LIB.bodies[id];
+  for(k in it) if(Object.prototype.hasOwnProperty.call(it,k)) m[k]=it[k];
+  m.fromLib=1;
+  if(b){ m.text=libClean(b.text); m.key=b.key; if(b.audio) m.audio=b.audio; }
+  return m;
+}
+function allItems(){
+  var a=dailyItems(), b=libItems(), seen={}, out=[], i;
+  for(i=0;i<a.length;i++){ seen[a[i].id]=1; out.push(a[i]); }
+  for(i=0;i<b.length;i++){ if(!seen[b[i].id]){ seen[b[i].id]=1; out.push(b[i]); } }
+  return out;
+}
+function libLoad(force){
+  if(LIB.busy) return;
+  if(LIB.idx && !force){ if(CURRENT==="library") render(); return; }
+  LIB.busy=true;
+  fetch("./data/library/index.json", {cache:"no-store"}).then(function(r){
+    if(!r.ok) throw new Error("HTTP "+r.status);
+    return r.json();
+  }).then(function(j){
+    if(!j || !j.items || !j.items.length) throw new Error("empty");
+    LIB.idx=j; LIB.from="net"; LIB.busy=false;
+    try{ offIdbPut("lib_idx", j); }catch(e){}
+    if(CURRENT==="library" || CURRENT==="home" || CURRENT==="daily") render();
+  }).catch(function(){
+    offIdbGet("lib_idx").then(function(v){
+      if(v && v.items && v.items.length){ LIB.idx=v; LIB.from="cache"; }
+      else { LIB.idx={items:[],count:0,total_available:0}; LIB.from="none"; }
+    }).catch(function(){ LIB.idx={items:[],count:0,total_available:0}; LIB.from="none"; }).then(function(){
+      LIB.busy=false;
+      if(CURRENT==="library" || CURRENT==="home" || CURRENT==="daily") render();
+      if(force) toast(LIB.from==="cache" ? "连不上网络，看的是上次缓存的素材库" : "暂时取不到素材库，联网后再试");
+    });
+  });
+}
+function libShardFile(n){ var s=String(n); while(s.length<2) s="0"+s; return "./data/library/s/"+s+".json"; }
+function libEnsureBody(id){
+  var it=libById(id);
+  if(!it) return Promise.reject(new Error("not found"));
+  if(it.text) return Promise.resolve(it);
+  var s=it.shard;
+  if(LIB.shardLoad[s]) return Promise.resolve(libById(id));
+  if(!LIB.shardPend[s]){
+    LIB.shardPend[s]=fetch(libShardFile(s), {cache:"no-store"}).then(function(r){
+      if(!r.ok) throw new Error("HTTP "+r.status);
+      return r.json();
+    }).then(function(j){
+      (j.items||[]).forEach(function(b){ LIB.bodies[b.id]=b; });
+      LIB.shardLoad[s]=1;
+      delete LIB.shardPend[s];
+      try{ offIdbPut("lib_s"+s, j); }catch(e){}
+      return true;
+    }).catch(function(){
+      delete LIB.shardPend[s];
+      return offIdbGet("lib_s"+s).then(function(v){
+        if(v && v.items){ v.items.forEach(function(b){ LIB.bodies[b.id]=b; }); LIB.shardLoad[s]=1; }
+        return !!(v && v.items);
+      });
+    });
+  }
+  return LIB.shardPend[s].then(function(){ return libById(id); });
+}
+function libFiltered(){
+  var a=libItems(), q=(LIB.q||"").trim().toLowerCase(), lv=LIB.lv, out=[], i, it;
+  for(i=0;i<a.length;i++){
+    it=a[i];
+    if(lv && it.level!==lv) continue;
+    if(q){
+      var hay=(it.title+" "+(it.kw?it.kw.join(" "):"")).toLowerCase();
+      if(q.length<=3){
+        if(!new RegExp("\\b"+q.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")+"\\b").test(hay)) continue;
+      } else if(hay.indexOf(q)<0) continue;
+    }
+    out.push(it);
+  }
+  return out;
+}
+function libSetQ(v){ LIB.q=v; LIB.show=30; libPaint(); }
+function libSetLv(n){ LIB.lv=n; LIB.show=30; render(); }
+function libMore(){ LIB.show+=30; libPaint(); }
+function libPaint(){ var el=document.getElementById("libList"); if(el) el.innerHTML=libListHtml(); }
+function libListHtml(){
+  var a=libFiltered(), i, h="";
+  if(!a.length) return '<div class="card"><div class="small muted">没有匹配的篇目，换个词或切难度。</div></div>';
+  h+='<div class="tiny muted" style="margin:2px 2px 10px">匹配 '+a.length+' 篇'+(a.length>LIB.show?(' · 已显示 '+LIB.show+' 篇'):'')+'</div>';
+  for(i=0;i<a.length && i<LIB.show;i++){
+    var it=a[i];
+    h+='<div class="dl-item" onclick="dailyOpen(\''+it.id+'\')">'+
+       '<div class="dl-top"><span class="dl-src">'+esc(it.src)+'</span><span class="dl-lv">L'+it.level+'</span>'+
+       '<span class="dl-meta">'+esc(it.date)+'</span><span class="dl-meta">'+it.words+' 词</span>'+
+       (dailyIsRead(it.id)?'<span class="dl-meta" style="color:var(--green-d)">✓ 已读</span>':'')+'</div>'+
+       '<div class="dl-t">'+esc(it.title)+'</div>'+
+       '</div>';
+  }
+  if(a.length>LIB.show) h+='<button class="btn ghost" style="width:100%;margin-top:12px" onclick="libMore()">再加载 30 篇（还剩 '+(a.length-LIB.show)+'）</button>';
+  return h;
+}
+function htmlLibrary(){
+  if(!LIB.idx && !LIB.busy) libLoad(false);
+  var h=backBar("素材库","daily");
+  var n=libItems().length;
+  var avail=(LIB.idx && LIB.idx.total_available) ? LIB.idx.total_available : 0;
+  h+='<div class="card tight">'+
+     '<div class="hd"><h3>素材库</h3><div class="right"><button class="mini" onclick="libLoad(true)">刷新</button></div></div>'+
+     '<div class="small muted">'+(LIB.busy && !n ? '正在取素材库索引…' : ('已收录 '+n+' 篇'+(avail?(' · 源站可选约 '+avail+' 篇'):'')+'，正文联网按需抓取'))+'</div>'+
+     (LIB.from==="cache" ? '<div class="tiny" style="margin-top:8px;color:var(--amber)">离线：显示上次缓存的索引，联网后自动更新。</div>' : '')+
+     (LIB.idx && LIB.idx.updated ? '<div class="tiny muted" style="margin-top:6px">索引更新 '+esc(String(LIB.idx.updated).replace("T"," ").replace("Z",""))+' UTC · 每周自动扩容</div>' : '')+
+     '</div>';
+  h+='<div class="card tight">'+
+     '<input id="libQ" value="'+esc(LIB.q||"")+'" placeholder="搜标题或主题词：school / health / robot" oninput="libSetQ(this.value)" '+
+     'style="width:100%;border:1px solid var(--line);border-radius:12px;padding:11px 12px;font-size:15px;background:#FBFBF8;outline:none;box-sizing:border-box">'+
+     '<div class="row wrap" style="gap:6px;margin-top:10px">'+
+       '<button class="chip'+(LIB.lv===0?' act':'')+'" onclick="libSetLv(0)">全部</button>'+
+       '<button class="chip'+(LIB.lv===1?' act':'')+'" onclick="libSetLv(1)">L1 入门</button>'+
+       '<button class="chip'+(LIB.lv===2?' act':'')+'" onclick="libSetLv(2)">L2 进阶</button>'+
+       '<button class="chip'+(LIB.lv===3?' act':'')+'" onclick="libSetLv(3)">L3 原速</button>'+
+     '</div></div>';
+  h+='<div id="libList">'+libListHtml()+'</div>';
+  h+='<div class="tiny muted" style="margin:14px 2px 24px;line-height:1.7">正文来自 '+
+     '<a href="https://www.newsinlevels.com/" target="_blank" rel="noopener">News in Levels</a>、'+
+     '<a href="https://breakingnewsenglish.com/" target="_blank" rel="noopener">Breaking News English</a>、'+
+     '<a href="https://learningenglish.voanews.com/" target="_blank" rel="noopener">VOA Learning English</a> 的公开学习文章；'+
+     '读过一次就缓存在本地，断网也能重读。版权归原站。</div>';
+  return h;
+}
+
 function dailyAgo(ts){
   if(!ts) return "";
   var d=+new Date(ts), diff=Math.round((Date.now()-d)/60000);
@@ -3769,7 +3912,11 @@ function dailyAgo(ts){
   return Math.round(diff/1440)+" 天前";
 }
 function dailyItems(){ return (DAILY.data && DAILY.data.items) || []; }
-function dailyById(id){ var a=dailyItems(),i; for(i=0;i<a.length;i++) if(a[i].id===id) return a[i]; return null; }
+function dailyById(id){
+  var a=dailyItems(),i;
+  for(i=0;i<a.length;i++) if(a[i].id===id) return a[i];
+  return libById(id);
+}
 function dailyIsRead(id){ return !!(DB.daily && DB.daily.read && DB.daily.read[id]); }
 
 function dailyPaint(){
@@ -3821,9 +3968,17 @@ function dailyPickRandom(){
   dailyOpen(pool[Math.floor(Math.random()*pool.length)].id);
 }
 function dailyOpen(id){
-  if(!dailyById(id)){ toast("这篇没在缓存里了"); return; }
-  DAILY.cur=id; DAILY.quiz=null; DAILY.sents=[];
+  var it=dailyById(id);
+  if(!it){ toast("这篇不在库里，刷新素材库再试"); return; }
+  DAILY.cur=id; DAILY.quiz=null; DAILY.sents=[]; DAILY.sentFor="";
   go("dailyread");
+  if(!it.text){
+    libEnsureBody(id).then(function(got){
+      DAILY.sents=[]; DAILY.sentFor="";
+      if(!got || !got.text) toast("网络不可用，这篇正文还没缓存下来");
+      if(CURRENT==="dailyread") render();
+    }).catch(function(){ toast("网络不可用，这篇正文还没缓存下来"); });
+  }
 }
 function dailyRate(){
   var rs=[0.75,0.85,0.95,1.05], cur=DB.rate||0.92, i, n=rs[0];
@@ -3867,6 +4022,24 @@ function dailyMarkRead(){
   toast("记了一笔阅读"+(put?"，"+put+" 个词进了词网回流":""));
   render();
 }
+function dailyNext(){
+  var it=dailyById(DAILY.cur); if(!it) return;
+  var all=allItems(), pool=[], i, idx=-1;
+  if(it.fromLib){
+    /* 素材库内：跟随当前搜索与难度上下文 */
+    var f=libFiltered();
+    if(f.length>1) pool=f;
+  }
+  if(!pool.length){
+    for(i=0;i<all.length;i++){ if(all[i].level===it.level) pool.push(all[i]); }
+    if(pool.length<2) pool=all;
+  }
+  pool.sort(function(a,b){ return (a.date<b.date)?1:((a.date>b.date)?-1:0); });
+  for(i=0;i<pool.length;i++){ if(pool[i].id===it.id){ idx=i; break; } }
+  var nxt=pool[(idx+1)%pool.length];
+  if(!nxt) return;
+  dailyOpen(nxt.id);
+}
 function dailyQuizStart(){
   var it=dailyById(DAILY.cur); if(!it) return;
   var pool=[], i, j;
@@ -3900,6 +4073,7 @@ function dailyQuizPick(qi, oi){
 
 function htmlDaily(){
   if(!DAILY.data && !DAILY.busy) dailyLoad(false);
+  if(!LIB.idx && !LIB.busy) libLoad(false);
   var h=backBar("每日素材","home");
   var n=dailyItems().length;
   if(DAILY.busy && !n){
@@ -3908,6 +4082,15 @@ function htmlDaily(){
   h+='<div class="card tight">'+
      '<div class="hd"><h3>每日素材</h3><div class="right"><button class="mini" onclick="dailyLoad(true)">刷新</button></div></div>'+
      '<div class="small muted">'+esc(dailyHomeLine())+'</div>';
+  /* 素材库入口：不再局限于每天几篇 */
+  var ln=libItems().length;
+  h+='<div class="row" style="margin-top:12px;align-items:center;justify-content:space-between;gap:10px;border-top:1px solid var(--line);padding-top:11px">'+
+       '<div style="flex:1;min-width:0">'+
+         '<div style="font-size:13.5px;font-weight:800">素材库'+(ln?(' · 已收录 '+ln+' 篇'):'')+'</div>'+
+         '<div class="tiny muted" style="margin-top:3px">按关键词和难度检索，正文联网按需抓取，读过就缓存在本地</div>'+
+       '</div>'+
+       '<button class="btn sm ghost" onclick="go(\'library\')">进入 ›</button>'+
+     '</div>';
   if(DAILY.from==="cache") h+='<div class="tiny" style="margin-top:8px;color:var(--amber)">离线模式：显示上次缓存，联网后自动换成当天的。</div>';
   if(DAILY.from==="net" && DAILY.data && DAILY.data.updated) h+='<div class="tiny muted" style="margin-top:6px">抓取时间 '+esc(DAILY.data.updated.replace("T"," ").replace("Z",""))+' UTC · 由 GitHub Actions 每天定时更新</div>';
   h+='</div>';
@@ -3947,16 +4130,28 @@ function htmlDaily(){
 
 function htmlDailyRead(){
   var it=dailyById(DAILY.cur);
+  var backTo=(it && it.fromLib)?"library":"daily";
   if(!it){
     if(!DAILY.data && !DAILY.busy) dailyLoad(false);
     return backBar("每日素材","daily")+'<div class="card"><div class="small muted">这篇不在缓存里，回列表重新选一篇。</div></div>';
   }
+  if(!it.text){
+    if(DAILY.fetching!==it.id){
+      DAILY.fetching=it.id;
+      libEnsureBody(it.id).then(function(got){
+        DAILY.fetching="";
+        if(got && got.text){ DAILY.sents=[]; DAILY.sentFor=""; if(CURRENT==="dailyread") render(); }
+        else toast("这篇正文没取到，联网后再点一次");
+      }).catch(function(){ DAILY.fetching=""; toast("这篇正文没取到，联网后再点一次"); });
+    }
+    return backBar(it.fromLib?"素材库":"每日素材",backTo)+'<div class="card"><div class="small muted">正在从资源库取这篇正文…</div></div>';
+  }
   if(!DAILY.sents.length || DAILY.sentFor!==it.id){ DAILY.sents=dailySplit(it.text); DAILY.sentFor=it.id; }
-  var h=backBar("每日素材","daily");
+  var h=backBar(it.fromLib?"素材库":"每日素材", backTo);
   /* 同标题不同难度切换 */
-  var sibs=[], i;
-  for(i=0;i<dailyItems().length;i++){
-    var o=dailyItems()[i];
+  var sibs=[], i, alls=allItems();
+  for(i=0;i<alls.length;i++){
+    var o=alls[i];
     if(o.title===it.title) sibs.push(o);
   }
   sibs.sort(function(a,b){ return a.level-b.level; });
@@ -3979,6 +4174,7 @@ function htmlDailyRead(){
      '<div class="row wrap" style="gap:7px">'+
      '<button class="btn sm" onclick="dailyPlayAll()">朗读全文</button>'+
      '<button class="btn sm ghost" onclick="stopSpeak()">停</button>'+
+     '<button class="btn sm ghost" onclick="dailyNext()">下一篇</button>'+
      '<button class="btn sm ghost" onclick="dailyRate()">语速 '+((DB.rate||0.92))+'×</button>'+
      '<button class="btn sm ghost" onclick="dailyQuizStart()">生词小测</button>'+
      '<button class="btn sm ghost" onclick="dailyMarkRead()">'+(dailyIsRead(it.id)?'已读过':'标记已读')+'</button>'+
@@ -3996,10 +4192,11 @@ function htmlDailyRead(){
   h+='</div><div class="tiny muted" style="margin-top:12px">绿色虚线词在你的词库里，点开看释义；点句子单独朗读。</div></div>';
 
   /* 生词 */
-  if(it.key && it.key.length){
-    h+='<div class="card"><div class="hd"><h3>这篇的重点词</h3><div class="right"><span class="tag">'+it.key.length+'</span></div></div><div class="dl-key">';
-    for(i=0;i<it.key.length;i++){
-      var k=it.key[i], v=VOCAB_BY_W[k];
+  var ksUsed=(it.key&&it.key.length)?it.key:((it.kw&&it.kw.length)?it.kw.slice(0,10):[]);
+  if(ksUsed.length){
+    h+='<div class="card"><div class="hd"><h3>这篇的重点词</h3><div class="right"><span class="tag">'+ksUsed.length+'</span></div></div><div class="dl-key">';
+    for(i=0;i<ksUsed.length;i++){
+      var k=ksUsed[i], v=VOCAB_BY_W[k];
       if(v){
         h+='<button class="dl-k" onclick="openWord(\''+v.w.replace(/'/g,"")+'\')">'+esc(v.w)+'<i>'+esc(v.cn)+'</i></button>';
       }else{
@@ -4039,6 +4236,7 @@ function htmlHome(){
   if(box.length<5){ for(var j=0;j<VOCAB.length && box.length<5;j++){ var w=VOCAB[j].w.toLowerCase(); if(box.indexOf(w)<0) box.push(w); } }
 
     if(!DAILY.data && !DAILY.busy) dailyLoad(false);
+  if(!LIB.idx && !LIB.busy) libLoad(false);
   var dn=dailyItems().length, dtoday=dk(), dread=0, dnew=0, di;
   for(di=0;di<dn;di++){ if(dailyItems()[di].date===dtoday) dnew++; if(!dailyIsRead(dailyItems()[di].id)) dread++; }
   var dcard='<div class="card dailyCard" onclick="go(\'daily\')" style="cursor:pointer">'+
@@ -4048,6 +4246,7 @@ function htmlHome(){
     '<div class="row wrap" style="margin-top:10px">'+
       '<button class="btn sm" onclick="event.stopPropagation();go(\'daily\')">打开今日素材</button>'+
       (dn?'<button class="btn sm ghost" onclick="event.stopPropagation();dailyPickRandom()">随机读一篇</button>':'')+
+      '<button class="btn sm ghost" onclick="event.stopPropagation();go(\'library\')">素材库'+(libItems().length?(' '+libItems().length+' 篇'):'')+'</button>'+
     '</div></div>';
   var h=dcard+'<div class="card">'+
     '<div class="hd"><h3>今天 · 五步闭环</h3><div class="right"><span class="chip">'+done+'/5</span></div></div>'+
