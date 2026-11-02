@@ -3800,6 +3800,46 @@ function allItems(){
   for(i=0;i<b.length;i++){ if(!seen[b[i].id]){ seen[b[i].id]=1; out.push(b[i]); } }
   return out;
 }
+function libSrcName(n,j){ var S=(j&&j.sources)||(LIB.idx&&LIB.idx.sources)||["News in Levels"]; return S[n||0]||S[0]; }
+function libDerive(item){
+  /* 索引为瘦身版：id 形如 nil-<topic>-l<level>，title 与 url 均可由 id 还原 */
+  var m=/^nil-(.+)-l(\d)$/.exec(item[0]||"");
+  if(!m) return {title:"", url:""};
+  var t=m[1].replace(/-/g," ");
+  return { title:t.charAt(0).toUpperCase()+t.slice(1),
+           url:"https://www.newsinlevels.com/products/"+m[1]+"-level-"+m[2]+"/" };
+}
+function libNormIdx(j){
+  if(!j || !j.items || !j.items.length) return j;
+  if(!Array.isArray(j.items[0])) return j;   /* 旧版对象格式，直接用 */
+  var a=j.items, out=new Array(a.length), i, r, d;
+  for(i=0;i<a.length;i++){
+    r=a[i]; d=libDerive(r);
+    out[i]={ id:r[0], src:libSrcName(r[6],j), level:r[1],
+             title:(r.length>7&&r[7])?r[7]:d.title, date:r[2],
+             url:(r.length>8&&r[8])?r[8]:d.url, words:r[3], shard:r[4],
+             kw:r[5]?String(r[5]).split(" ").filter(Boolean):[] };
+  }
+  j.items=out;
+  return j;
+}
+function libFetchYears(meta){
+  /* v3 索引：index.json 只存元信息，条目按年拆在 ./data/library/i/YYYY.json，并行拉取后合并 */
+  var ys=Object.keys(meta.years||{});
+  if(!ys.length) return Promise.reject(new Error("no years"));
+  return Promise.all(ys.map(function(y){
+    return fetch("./data/library/i/"+y+".json").then(function(r){
+      if(!r.ok) throw new Error("HTTP "+r.status);
+      return r.json();
+    }).then(function(p){ return (p && p.items) || []; });
+  })).then(function(arrs){
+    var items=[], i, k, a;
+    for(i=0;i<arrs.length;i++){ a=arrs[i]; for(k=0;k<a.length;k++) items.push(a[k]); }
+    if(!items.length) throw new Error("empty");
+    meta.items=items; meta.count=items.length;
+    return meta;
+  });
+}
 function libLoad(force){
   if(LIB.busy) return;
   if(LIB.idx && !force){ if(CURRENT==="library") render(); return; }
@@ -3808,13 +3848,17 @@ function libLoad(force){
     if(!r.ok) throw new Error("HTTP "+r.status);
     return r.json();
   }).then(function(j){
+    if(j && j.v>=3 && j.years) return libFetchYears(j);
     if(!j || !j.items || !j.items.length) throw new Error("empty");
-    LIB.idx=j; LIB.from="net"; LIB.busy=false;
+    return j;
+  }).then(function(j){
+    if(!j || !j.items || !j.items.length) throw new Error("empty");
     try{ offIdbPut("lib_idx", j); }catch(e){}
+    LIB.idx=libNormIdx(j); LIB.from="net"; LIB.busy=false;
     if(CURRENT==="library" || CURRENT==="home" || CURRENT==="daily") render();
   }).catch(function(){
     offIdbGet("lib_idx").then(function(v){
-      if(v && v.items && v.items.length){ LIB.idx=v; LIB.from="cache"; }
+      if(v && v.items && v.items.length){ LIB.idx=libNormIdx(v); LIB.from="cache"; }
       else { LIB.idx={items:[],count:0,total_available:0}; LIB.from="none"; }
     }).catch(function(){ LIB.idx={items:[],count:0,total_available:0}; LIB.from="none"; }).then(function(){
       LIB.busy=false;
