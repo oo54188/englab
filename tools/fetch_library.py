@@ -220,6 +220,79 @@ def _throttled(u, vocab):
     return parse_nil_page(u, vocab)
 
 
+# ---------- 索引读写：v3 瘦身格式 ----------
+# 目标：把 5.4MB 单文件索引拆成「极小元信息 + 按年分文件」，并把 title/url/src 从索引里彻底删掉
+#   （title 与 url 均可由 id（nil-<topic>-l<n>）在前端派生，src 走顶层 sources）
+#   data/library/index.json   {v,updated,count,shards,total_available,sources,years:{2026:1329,...}}
+#   data/library/i/YYYY.json  {v,year,items:[[id,level,date,words,shard,"kw kw"],...]}
+# 每日 CI 只重写「当年」那一个文件（约 200KB），仓库日增长从 ~5.4MB 降到 ~0.2MB
+IDX_DIR = os.path.join(LIB, "i")
+
+
+def _row_to_item(r):
+    return {"id": r[0], "level": r[1], "date": r[2], "words": r[3], "shard": r[4],
+            "kw": (r[5] or "").split() if len(r) > 5 else []}
+
+
+def _item_to_row(it):
+    d = str(it.get("date") or "0000-00-00")
+    return [it["id"], it.get("level"), d, it.get("words"), it.get("shard"),
+            " ".join(it.get("kw") or [])]
+
+
+def load_index(index_path):
+    """兼容读取 v1(对象) / v2(单文件数组) / v3(按年拆分)，统一为内部对象列表。"""
+    try:
+        with open(index_path, encoding="utf-8") as f:
+            index = json.load(f)
+    except Exception:
+        return {"v": 3, "updated": "", "count": 0, "items": []}
+    items = index.get("items") or []
+    if items and isinstance(items[0], list):
+        index["items"] = [_row_to_item(r) for r in items]
+    elif not items:
+        rows = []
+        for y in sorted((index.get("years") or {}), reverse=True):
+            try:
+                with open(os.path.join(IDX_DIR, "%s.json" % y), encoding="utf-8") as f:
+                    rows.extend(json.load(f).get("items") or [])
+            except Exception:
+                pass
+        index["items"] = [_row_to_item(r) for r in rows]
+    for it in index["items"]:
+        it.setdefault("kw", [])
+    return index
+
+
+def write_index(index, index_path):
+    """写 v3：按年拆文件 + 极小元信息。返回 (总篇数, 索引总体积, 当年文件体积)。"""
+    os.makedirs(IDX_DIR, exist_ok=True)
+    groups = {}
+    for it in index["items"]:
+        groups.setdefault(str(it.get("date") or "0000-00-00")[:4], []).append(_item_to_row(it))
+    years, total, size = {}, 0, 0
+    for y, rows in groups.items():
+        rows.sort(key=lambda r: (r[2], r[0]), reverse=True)
+        fp = os.path.join(IDX_DIR, "%s.json" % y)
+        with open(fp, "w", encoding="utf-8") as f:
+            json.dump({"v": 3, "year": y, "items": rows}, f, ensure_ascii=False, separators=(",", ":"))
+        years[y] = len(rows)
+        total += len(rows)
+        size += os.path.getsize(fp)
+    for fn in os.listdir(IDX_DIR):
+        if fn.endswith(".json") and fn[:-5] not in years:
+            os.remove(os.path.join(IDX_DIR, fn))
+    cur_year = str(datetime.now().year)
+    meta = {"v": 3, "updated": index.get("updated", ""), "count": total,
+            "shards": index.get("shards", 0), "total_available": index.get("total_available", 0),
+            "sources": ["News in Levels"], "years": dict(sorted(years.items(), reverse=True))}
+    with open(index_path, "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, separators=(",", ":"))
+    size += os.path.getsize(index_path)
+    cur_fp = os.path.join(IDX_DIR, "%s.json" % cur_year)
+    return total, size, (os.path.getsize(cur_fp) if os.path.exists(cur_fp) else 0)
+
+
 def main():
     limit = 0
     for a in sys.argv[1:]:
@@ -228,11 +301,7 @@ def main():
     os.makedirs(SHARD_DIR, exist_ok=True)
 
     index_path = os.path.join(LIB, "index.json")
-    try:
-        with open(index_path, encoding="utf-8") as f:
-            index = json.load(f)
-    except Exception:
-        index = {"v": 1, "updated": "", "count": 0, "items": []}
+    index = load_index(index_path)
     have = {it["id"] for it in index["items"]}
 
     shards = {}
@@ -278,7 +347,8 @@ def main():
             body = {k: it[k] for k in ("id", "text", "key")}
             shard_no = len(index["items"]) // SHARD_SIZE
             it["shard"] = shard_no
-            index["items"].append({k: it.get(k, [] if k == "kw" else "") for k in ("id", "src", "level", "title", "date", "url", "words", "shard", "kw")})
+            index["items"].append({"id": it["id"], "level": it.get("level", 1), "date": it.get("date", ""),
+                                   "words": it.get("words", 0), "shard": shard_no, "kw": it.get("kw") or []})
             shards.setdefault(shard_no, {"v": 1, "items": []})["items"].append(body)
             touched.add(shard_no)
             if len(shards[shard_no]["items"]) >= SHARD_SIZE:
@@ -301,10 +371,9 @@ def main():
         if not got:
             print("no new articles, index untouched:", index["count"], "items /", index["shards"], "shards")
             return
-        with open(index_path, "w", encoding="utf-8") as f:
-            json.dump(index, f, ensure_ascii=False, separators=(",", ":"))
-        print("wrote (incremental) index:", index["count"], "items /", index["shards"], "shards, touched shards:",
-              sorted(touched), "| size", os.path.getsize(index_path), "bytes")
+        n, size, cur = write_index(index, index_path)
+        print("wrote (incremental) index:", n, "items /", index["shards"], "shards, touched shards:",
+              sorted(touched), "| total", size, "bytes | daily delta ~", cur, "bytes")
         return
 
     # 重排：按日期倒序，再重新分片，保证前端首屏拿最新
@@ -333,12 +402,11 @@ def main():
     index["count"] = len(index["items"])
     index["shards"] = len(new_shards)
     index["total_available"] = len(seen_topic) * 3
-    with open(index_path, "w", encoding="utf-8") as f:
-        json.dump(index, f, ensure_ascii=False, separators=(",", ":"))
-    print("wrote index:", index["count"], "items /", len(new_shards), "shards, available:", index["total_available"],
-          "| size", os.path.getsize(index_path), "bytes")
+    n, size, cur = write_index(index, index_path)
+    print("wrote index:", n, "items /", len(new_shards), "shards, available:", index["total_available"],
+          "| total", size, "bytes | daily delta ~", cur, "bytes")
     for it in index["items"][:5]:
-        print("  ", it["date"], it["level"], it["title"][:46], "|", it["words"], "words")
+        print("  ", it["date"], it["level"], it["id"], "|", it["words"], "words")
 
 
 if __name__ == "__main__":
