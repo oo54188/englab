@@ -2401,6 +2401,7 @@ V("upload","/ˌʌpˈləʊd/","v./n.","上传",
   "up(向上) + load → 送到服务器上",
   "uploads|uploaded|uploading","submit|send|post","download",
   "upload a photo|upload speed|the upload failed",
+  "The photo upload failed.",
   "照片上传失败了。","科技",
   "向服务器发送是 upload，从服务器取回是 download；upload 不带 to the internet"),
 V("backup","/ˈbækʌp/","n.","备份",
@@ -3550,6 +3551,30 @@ function speak(text, rate, cb){
   if(!t){ if(cb) cb(); return; }
   stopSpeak();
   var r=rate||DB.rate||0.92, mode=ttsMode();
+  var nv=neuralVoice();
+  if(nv){
+    var ns=neuralSrc(nv, t);
+    if(ns){
+      wakeOn(); mediaSet(t);
+      netPlayOne(ns, r, function(ok){
+        NET.playing=false; wakeOff(); mediaOff();
+        if(ok){ if(cb) cb(); return; }
+        if(!NEU.hinted){
+          NEU.hinted=true;
+          toast("神经音色音频没播出来（首次可能没下载完），已改用默认语音");
+        }
+        speakCore(t, r, cb, mode);
+      });
+      return;
+    }
+    if(!NEU.hinted2 && t.length>18){
+      NEU.hinted2=true;
+      toast("神经音色只覆盖词库的单词和例句，这段内容用默认语音朗读");
+    }
+  }
+  speakCore(t, r, cb, mode);
+}
+function speakCore(t, r, cb, mode){
   if(mode==="local"){
     if(offSrc(t)){ netSay(t, r, function(ok){ if(!ok) localSpeak(t,r,cb); }); return; }
     localSpeak(t,r,cb); return;
@@ -5343,8 +5368,9 @@ function htmlMe(){
     '</div>'+
     '<div class="small muted" style="margin:12px 0 4px">离线语音包（断网也能读单词）</div>'+
     '<div id="offBox">'+offBoxHtml()+'</div>'+
-    '<div class="small muted" style="margin:10px 0 4px">发音人（仅系统语音生效）</div>'+
+    '<div class="small muted" style="margin:10px 0 4px">音色 / 发音人</div>'+
     '<select onchange="setVoice(this.value)">'+voiceOpts()+'</select>'+
+    '<div class="tiny muted" style="margin-top:6px;line-height:1.7">神经音色已内置在应用里，断网也能读词库全部单词和例句；文章这类长文本会自动改用在线或系统语音。系统语音需要本机装过英文语音包。</div>'+
     '<div class="tiny muted" style="margin-top:8px">'+esc(asrHint()||"录音评分可用：Chrome / Edge 效果最好，Safari 需 iOS 14.5+。")+'</div>'+
     '</div>';
 
@@ -5452,15 +5478,71 @@ function netCheck(){
 function goalBtn(n){
   return '<button class="'+((DB.goal||20)===n?"on":"")+'" onclick="DB.goal='+n+';saveDB();render()">'+n+'</button>';
 }
-function voiceOpts(){
-  var en=enVoices(), h='<option value="">自动选择</option>', i;
-  for(i=0;i<en.length;i++){
-    h+='<option value="'+esc(en[i].name)+'"'+(DB.voice===en[i].name?" selected":"")+'>'+esc(en[i].name)+' ('+en[i].lang+')</option>';
+/* --- 神经音色：微软神经 TTS 预生成的词库音频（本机内置，不依赖网络，音质最好） ---
+   覆盖范围：词库 272 个单词 + 各自例句；命中即播放，未命中自动回落在线/系统语音。 */
+var NEU = { hinted:false, hinted2:false, map:null };
+var NEURAL_VOICES = [
+  { id:"en-US-AriaNeural",  name:"Aria",  desc:"美音 · 女 · 播音腔", acc:"en" },
+  { id:"en-US-GuyNeural",   name:"Guy",   desc:"美音 · 男 · 播音腔", acc:"en" },
+  { id:"en-US-JennyNeural", name:"Jenny", desc:"美音 · 女 · 自然", acc:"en" },
+  { id:"en-GB-SoniaNeural", name:"Sonia", desc:"英音 · 女 · 标准", acc:"uk" }
+];
+function neuralVoice(){
+  var v=String(DB.voice||"");
+  if(v.indexOf("neural:")!==0) return null;
+  v=v.slice(7);
+  for(var i=0;i<NEURAL_VOICES.length;i++) if(NEURAL_VOICES[i].id===v) return v;
+  return null;
+}
+function neuKey(t){ return String(t==null?"":t).toLowerCase().replace(/\s+/g," ").trim(); }
+function neuMap(){
+  if(NEU.map) return NEU.map;
+  var m={w:{}, s:{}}, i, it, k;
+  for(i=0;i<VOCAB.length;i++){
+    it=VOCAB[i]; if(!it||!it.w) continue;
+    k=neuKey(it.w); if(k && !m.w[k]) m.w[k]=it.w;
+    if(it.ex){ k=neuKey(it.ex); if(k && !m.s[k]) m.s[k]=it.w; }
   }
-  if(!en.length) h+='<option value="">（未检测到英文发音人）</option>';
+  NEU.map=m;
+  return m;
+}
+function neuralSrc(voice, text){
+  var m=neuMap(), k=neuKey(text), w;
+  if(!k) return "";
+  w=m.w[k];
+  if(w) return "audio/"+voice+"/w_"+w+".mp3";
+  w=m.s[k];
+  if(w) return "audio/"+voice+"/s_"+w+".mp3";
+  return "";
+}
+function voiceOpts(){
+  var en=enVoices(), h='<option value="">自动选择</option>', i, val;
+  h+='<optgroup label="神经音色（音质最好 · 词库单词与例句）">';
+  for(i=0;i<NEURAL_VOICES.length;i++){
+    val="neural:"+NEURAL_VOICES[i].id;
+    h+='<option value="'+esc(val)+'"'+(DB.voice===val?" selected":"")+'>'+
+       esc(NEURAL_VOICES[i].name)+' — '+esc(NEURAL_VOICES[i].desc)+'</option>';
+  }
+  h+='</optgroup>';
+  if(en.length){
+    h+='<optgroup label="系统语音（本机语音包 · 可读任意文本）">';
+    for(i=0;i<en.length;i++){
+      h+='<option value="'+esc(en[i].name)+'"'+(DB.voice===en[i].name?" selected":"")+'>'+esc(en[i].name)+' ('+en[i].lang+')</option>';
+    }
+    h+='</optgroup>';
+  }
   return h;
 }
-function setVoice(v){ DB.voice=v; saveDB(); speak("This is the selected voice."); }
+function setVoice(v){
+  DB.voice=v; saveDB();
+  if(v.indexOf("neural:")===0){
+    var w=(VOCAB[0]&&VOCAB[0].w)||"significant";
+    speak(w, null, null);
+    toast("已切换到神经音色，试听「"+w+"」");
+    return;
+  }
+  speak("This is the selected voice.");
+}
 function dl(name, text, type){
   var blob=new Blob([text],{type:type||"text/plain;charset=utf-8"});
   var a=document.createElement("a");
