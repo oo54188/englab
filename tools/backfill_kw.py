@@ -6,14 +6,13 @@
 import json, os, re, glob, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from fetch_library import LIB, SHARD_DIR, clean_text, key_words, kw_of, words_of, load_vocab
+from fetch_library import LIB, SHARD_DIR, clean_text, key_words, kw_of, words_of, load_vocab, load_index, write_index
 
 
 def main():
     vocab = load_vocab()
     index_path = os.path.join(LIB, "index.json")
-    with open(index_path, encoding="utf-8") as f:
-        index = json.load(f)
+    index = load_index(index_path)
 
     meta = {}
     changed = 0
@@ -40,10 +39,9 @@ def main():
         else:
             miss += 1
             it.setdefault("kw", [])
-    with open(index_path, "w", encoding="utf-8") as f:
-        json.dump(index, f, ensure_ascii=False, separators=(",", ":"))
-    print("cleaned bodies:", changed, "| index items:", len(index["items"]),
-          "| index without body:", miss, "| size", os.path.getsize(index_path))
+    n, size, cur = write_index(index, index_path)
+    print("cleaned bodies:", changed, "| index items:", n,
+          "| index without body:", miss, "| total", size, "bytes | daily delta ~", cur, "bytes")
 
 
 if __name__ == "__main__":
