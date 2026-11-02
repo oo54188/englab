@@ -285,10 +285,11 @@ def main():
                 shard_no += 1
     print("fetched:", got, "in", round(time.time() - t0, 1), "s")
 
-    # REPACK=0：增量模式（CI 每日扩容用），只写本次新增的分片，不重排不删除，
-    # 避免每天把 255 个分片全量重写导致仓库每天都增长约 21MB。
+    # 默认增量模式：只写本次新增的分片，不重排不删除，避免每天把 255 个分片全量重写
+    # （每次约 21MB）导致仓库体积暴涨。需要按日期重排整体分片时，用 LIB_REPACK=1 或 --repack。
     # 前端已按日期倒序排序，因此索引顺序不再影响首屏最新。
-    if os.environ.get("LIB_REPACK", "1") != "1":
+    repack = os.environ.get("LIB_REPACK", "0") == "1" or "--repack" in sys.argv
+    if not repack:
         for no in sorted(touched):
             with open(os.path.join(SHARD_DIR, "%02d.json" % no), "w", encoding="utf-8") as f:
                 json.dump(shards[no], f, ensure_ascii=False, separators=(",", ":"))
