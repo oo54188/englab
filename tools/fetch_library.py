@@ -8,7 +8,7 @@
 增量：已存在于索引的 id 跳过；--limit N 限制本次抓取篇数（供 CI 分批推进）
 仅用标准库。
 """
-import json, os, re, html, sys, time, urllib.request, urllib.error
+import json, os, re, html, sys, time, tempfile, random, urllib.request, urllib.error
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
@@ -20,16 +20,19 @@ UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.3
       "Accept-Language": "en-US,en;q=0.9"}
 
 
-def fetch(url, timeout=20, tries=2):
-    last = None
-    for _ in range(tries):
+def fetch(url, timeout=20, tries=4):
+    """带指数退避：源站对高频并发会返回 503，需退避后重试。"""
+    last, delay = None, 2.0
+    for i in range(tries):
         try:
             req = urllib.request.Request(url, headers=UA)
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 return r.read().decode("utf-8", "ignore")
         except Exception as e:
             last = e
-            time.sleep(0.6)
+            if i < tries - 1:
+                time.sleep(delay)
+                delay = min(delay * 2, 20)
     print("  fail:", url[-60:], type(last).__name__, str(last)[:60])
     return ""
 
@@ -127,8 +130,11 @@ def key_words(text, vocab, extra=None, limit=14):
 
 
 # ---------- 索引：News in Levels 全量 sitemap ----------
-def nil_sitemap_urls():
-    """返回 [(url, lastmod)]，按 lastmod 倒序（新文章优先）"""
+SITEMAP_CACHE = os.path.join(tempfile.gettempdir(), "nil_sitemap.json")
+SITEMAP_TTL = 6 * 3600
+
+
+def _crawl_sitemap():
     urls = {}
     idx = fetch("https://www.newsinlevels.com/wp-sitemap.xml", timeout=25)
     maps = re.findall(r"<loc>(.*?)</loc>", idx)
@@ -148,9 +154,34 @@ def nil_sitemap_urls():
     return sorted(urls.items(), key=lambda kv: (kv[1], kv[0]), reverse=True)
 
 
+def nil_sitemap_urls():
+    """返回 [(url, lastmod)]，按 lastmod 倒序（新文章优先）；本地缓存 6 小时内复用，抓空则多轮重试。"""
+    try:
+        if time.time() - os.path.getmtime(SITEMAP_CACHE) < SITEMAP_TTL:
+            with open(SITEMAP_CACHE, encoding="utf-8") as f:
+                cached = json.load(f)
+            if len(cached) > 1000:
+                print("sitemap from cache:", len(cached))
+                return [tuple(x) for x in cached]
+    except Exception:
+        pass
+    for attempt in range(6):
+        got = _crawl_sitemap()
+        if len(got) > 1000:
+            try:
+                with open(SITEMAP_CACHE, "w", encoding="utf-8") as f:
+                    json.dump(got, f)
+            except Exception:
+                pass
+            return got
+        print("sitemap empty/tiny (%d), retry %d" % (len(got), attempt + 1))
+        time.sleep(3 + attempt * 4)
+    return []
+
+
 # ---------- 正文：单篇 ----------
 def parse_nil_page(url, vocab):
-    t = fetch(url, timeout=20, tries=1)
+    t = fetch(url, timeout=20, tries=3)
     if not t:
         return None
     m = re.search(r'(?is)<[^>]*id="nContent"[^>]*>', t)
@@ -183,6 +214,12 @@ def parse_nil_page(url, vocab):
     }
 
 
+def _throttled(u, vocab):
+    """源站限流较严：请求前抖动间隔，避免 503。"""
+    time.sleep(random.uniform(0.5, 0.9))
+    return parse_nil_page(u, vocab)
+
+
 def main():
     limit = 0
     for a in sys.argv[1:]:
@@ -209,6 +246,9 @@ def main():
 
     print("crawl sitemap ...")
     pairs = nil_sitemap_urls()
+    if not pairs:
+        print("sitemap unavailable, abort without touching data")
+        sys.exit(3)
     urls = [u for u, _ in pairs]
     print("sitemap urls:", len(urls))
     todo = []
@@ -229,8 +269,9 @@ def main():
 
     vocab = load_vocab()
     got, t0 = 0, time.time()
-    with ThreadPoolExecutor(max_workers=8) as ex:
-        for it in ex.map(lambda u: parse_nil_page(u, vocab), todo):
+    touched = set()
+    with ThreadPoolExecutor(max_workers=int(os.environ.get("LIB_WORKERS", "3"))) as ex:
+        for it in ex.map(lambda u: _throttled(u, vocab), todo):
             if not it:
                 continue
             got += 1
@@ -239,9 +280,31 @@ def main():
             it["shard"] = shard_no
             index["items"].append({k: it.get(k, [] if k == "kw" else "") for k in ("id", "src", "level", "title", "date", "url", "words", "shard", "kw")})
             shards.setdefault(shard_no, {"v": 1, "items": []})["items"].append(body)
+            touched.add(shard_no)
             if len(shards[shard_no]["items"]) >= SHARD_SIZE:
                 shard_no += 1
     print("fetched:", got, "in", round(time.time() - t0, 1), "s")
+
+    # REPACK=0：增量模式（CI 每日扩容用），只写本次新增的分片，不重排不删除，
+    # 避免每天把 255 个分片全量重写导致仓库每天都增长约 21MB。
+    # 前端已按日期倒序排序，因此索引顺序不再影响首屏最新。
+    if os.environ.get("LIB_REPACK", "1") != "1":
+        for no in sorted(touched):
+            with open(os.path.join(SHARD_DIR, "%02d.json" % no), "w", encoding="utf-8") as f:
+                json.dump(shards[no], f, ensure_ascii=False, separators=(",", ":"))
+        now = datetime.now(timezone.utc)
+        index["updated"] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        index["count"] = len(index["items"])
+        index["shards"] = len([k for k, v in shards.items() if v["items"]])
+        index["total_available"] = len(seen_topic) * 3
+        if not got:
+            print("no new articles, index untouched:", index["count"], "items /", index["shards"], "shards")
+            return
+        with open(index_path, "w", encoding="utf-8") as f:
+            json.dump(index, f, ensure_ascii=False, separators=(",", ":"))
+        print("wrote (incremental) index:", index["count"], "items /", index["shards"], "shards, touched shards:",
+              sorted(touched), "| size", os.path.getsize(index_path), "bytes")
+        return
 
     # 重排：按日期倒序，再重新分片，保证前端首屏拿最新
     index["items"].sort(key=lambda x: (x["date"], x["id"]), reverse=True)
