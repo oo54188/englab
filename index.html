@@ -3765,7 +3765,18 @@ var DAILY = { data:null, from:"none", busy:false, cur:"", sents:[], quiz:null };
 /* ================= 素材库：联网全量真实素材（不限于每天几篇） ================= */
 var LIB = { idx:null, from:"none", busy:false, q:"", lv:0, show:30, bodies:{}, shardLoad:{}, shardPend:{}, fetching:"" };
 
-function libItems(){ return (LIB.idx && LIB.idx.items) || []; }
+function libItems(){
+  var a=(LIB.idx && LIB.idx.items) || [];
+  if(LIB.sortedFor!==LIB.idx){
+    a.sort(function(x,y){
+      var d=String(y.date||""), c=String(x.date||"");
+      if(d!==c) return d<c?-1:1;
+      return String(y.id||"")<String(x.id||"")?-1:1;
+    });
+    LIB.sortedFor=LIB.idx;
+  }
+  return a;
+}
 function libClean(t){
   t=String(t||"");
   t=t.replace(/^\s*id="[^"]*">/,'').replace(/\s*<[a-zA-Z\/][^>]*>\s*$/,'').replace(/\s*<[a-zA-Z\/][^>]*$/,'')
