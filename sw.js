@@ -1,5 +1,5 @@
 /* EngLab Service Worker — 让应用断网也能打开 */
-const VERSION = 'englab-v31';   /* 改过 audio/bg 下的 mp3 必须一起改这里，否则用户拿到旧缓存 */
+const VERSION = 'englab-v32';   /* 改过 audio/bg 下的 mp3 必须一起改这里，否则用户拿到旧缓存 */
 const CORE = [
   './',
   './index.html',
@@ -9,6 +9,7 @@ const CORE = [
   './apple-touch-icon.png',
   './favicon-32.png',
   './data/daily.json',
+  './data/bg_index.json',                       /* v32：连播音轨的段索引，很小，离线也要 */
   /* 背景听工作材料（v25 共 62 段：美音 bg01–bg50、英/澳/印 bg51–bg62）。
      只把各口音的第一段常驻，保证首次离线切口音也有声音；其余听过的按需缓存。 */
   './audio/bg/bg01.mp3',
@@ -80,6 +81,11 @@ self.addEventListener('fetch', (e) => {
     );
     return;
   }
+
+  /* v32：连播长音轨交给原生网络栈——播放器全程发 Range 请求，
+     经过 Cache API 命中会拿到 200 全量响应，seek 反而变慢；且 8.8MB 不必占缓存。
+     拿不到就只有它退回分段接力，不影响正常出声 */
+  if (url.pathname.indexOf('bg_all.mp3') >= 0) return;
 
   // 背景听材料（audio/bg/*.mp3）：缓存优先，听一次就够离线用
   if (url.pathname.indexOf('audio/bg/') >= 0) {
