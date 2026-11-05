@@ -4534,6 +4534,7 @@ document.addEventListener("visibilitychange", function(){ spkVis(); });
 document.addEventListener("visibilitychange", function(){
   if(document.visibilityState !== "visible") return;
   if(typeof BG === "undefined" || !BG || !BG.playing || BG.paused) return;
+  if(BG.long && BGL.ready && BGL.el && BGL.el.paused === false) return;  /* v32：连播音轨还在走，别动 */
   if(BG.audio && BG.audio.paused === false) return;   /* 真的还在响，不动 */
   if(BG.speaking) return;
   if(BG.gapTimer){ clearTimeout(BG.gapTimer); BG.gapTimer = null; }
@@ -11781,6 +11782,7 @@ if(typeof window!=="undefined"){
 /* ===== 背景听：工作时与睡前用的长时听力（不是精听，不打断） ===== */
 
 var BG = { mode:"work", mins:30, rate:0.95, rateWork:0.95, rateSleep:0.8,
+           long:0,
            playing:false, paused:false, idx:0, remain:0,
            timer:null, gapTimer:null, elapsed:0, spoken:0, rounds:0,
            night:false, startedAt:0, pausedMs:0, pauseAt:0,
@@ -12986,9 +12988,16 @@ function bgGoalPick(ta, ga, tb, gb){
   return (TA > TB) ? { g: A, ts: TA } : { g: B, ts: TB };
 }
 function bgSetRate(r){
-  if(BG.playing) return;
+  /* v32：连播模式下语速是播放器属性，播放中直接改 playbackRate 即生效，不用停下重开
+     （老的分段播放要换 src 重建音频，所以以前播放中禁止改语速） */
+  var canLive = (BG.long && BG.mode === "work");
+  if(BG.playing && !canLive) return;
   BG.rate = r;
   if(BG.mode === "work") BG.rateWork = r; else BG.rateSleep = r;
+  if(canLive){
+    bglSetRate(r);
+    toast("语速已改为 " + r + "x，这段直接生效，不用停");
+  }
   render();
 }
 
@@ -13025,6 +13034,7 @@ function bgStart(fromHead){
     return;
   }
   BG.sq = null;                                   /* v26：每次起播重新组池 */
+  BG.long = 0;                                    /* v32：起播先清掉上轮连播身份，由 bglStart 重新认定 */
   audClaimBg();                                    /* v29：背景听独占出声，精听/单词那一路立刻停 */
   BG.seqToken++;
   var m = (BG.mode === "sleep") ? "sleep" : "work";
@@ -13081,6 +13091,8 @@ function bgResume(){
   audClaimBg();                                   /* v29：继续播也是抢占，精听那一路要停 */
   render();
   bgWakeOn();
+  /* v32：连播模式从暂停的位置接着放（音乐播放器的行为），不回到段首、不重载音轨 */
+  if(BG.long){ bglResume(); return; }
   bgMetaSet();                                    /* 恢复播放，锁屏状态与段标题重新对上 */
   bgPlayChunk();                                  /* 从本段开头接着放 */
 }
@@ -13088,6 +13100,15 @@ function bgResume(){
 function bgPlayChunk(){
   if(!BG.playing || BG.paused) return;
   /* v26：睡前听不再走"一次念一串"的老路径，改由 bgSleepPlayCur 逐条推进（A/D/B 单句 + C 整段 mp3） */
+  if(BG.mode === "sleep"){ bgSleepPlayCur(0); return; }
+  /* v32：工作听改走「一条长音轨」（网易云模式）——一次 play 之后不换源、不 pause。
+     息屏后浏览器媒体管线自己往下解码，不再出现"一段放完要亮屏才有声"。
+     长音轨拿不到（索引缺失/加载失败）时自动退回下面原来的分段播放，绝不哑掉 */
+  if(bgLongOn()){ bglStart(BG.idx); return; }
+  bgPlayChunkLegacy();
+}
+function bgPlayChunkLegacy(){
+  if(!BG.playing || BG.paused) return;
   if(BG.mode === "sleep"){ bgSleepPlayCur(0); return; }
   var list, rate, gap, seg = null;
   BG.idx = bgNormIdx(BG.idx);                     /* v25：越界/负值/不在选中集合内 一律归一，绝不出现空段 */
@@ -13128,6 +13149,312 @@ function bgPlayChunk(){
   }
 }
 
+/* ===== v32：工作听的「网易云模式」——一条长音轨连播 =====
+   老做法是一段一个 mp3：每段放完要在 onended 回调里换 src、重新 play。
+   息屏后 JS 被系统冻结，onended 不再回调，于是"一段放完要亮屏才有下一段"。
+   新做法跟音乐 App 一样：62 段提前按帧拼成一条 24.6 分钟的 bg_all.mp3，
+   一次 play 之后永不换源、永不 pause，段边界只用来更新字幕/记账/断点。
+   解码由浏览器媒体管线负责，页面被冻结也照样往下走，息屏不断声。
+   索引 data/bg_index.json 记录每段在长音轨里的起点秒数与时长。 */
+var BGL = { url:"audio/bg/bg_all.mp3", data:null, ready:0, loading:0, cb:null, bad:0,
+            el:null, bind:0, workOf:[], cur:-1, pendSeek:null, seekAt:0, saveAt:0, hidAt:0, prevCt:null };
+
+/* 是否走长音轨：只在工作听、且素材没被判死时启用 */
+function bgLongOn(){
+  if(BG.mode !== "work") return false;
+  if(BGL.bad) return false;
+  return true;
+}
+function bglEl(){
+  if(!BGL.el){
+    var a = new Audio();
+    a.preload = "auto";
+    try{ a.setAttribute("playsinline", ""); a.playsInline = true; }catch(e){}
+    BGL.el = a;
+  }
+  return BGL.el;
+}
+function bglLoad(cb){
+  if(BGL.ready){ if(cb) cb(1); return; }
+  if(BGL.loading){ if(cb) BGL.cb = cb; return; }
+  BGL.loading = 1; if(cb) BGL.cb = cb;
+  fetch("data/bg_index.json").then(function(r){
+    if(!r.ok) throw new Error("http " + r.status);
+    return r.json();
+  }).then(function(j){
+    if(!j || !j.segments || j.segments.length < 2) throw new Error("bad index");
+    BGL.data = j;
+    BGL.workOf = bglMapWork(j);
+    BGL.ready = 1; BGL.loading = 0;
+    var f = BGL.cb; BGL.cb = null; if(f) f(1);
+  }).catch(function(){
+    /* 索引拿不到：判死长音轨，退回分段播放。不静默、不半播 */
+    BGL.bad = 1; BGL.loading = 0;
+    var f = BGL.cb; BGL.cb = null; if(f) f(0);
+  });
+}
+/* 长音轨里的第 i 个音频段 → BG_WORK 下标（按文件名对齐；对不上的标 -1，绝不串段） */
+function bglMapWork(j){
+  var byName = {}, map = [], i, k;
+  for(i = 0; i < BG_WORK.length; i++){
+    k = String(BG_WORK[i].a || "").split("/").pop().toLowerCase();
+    if(k) byName[k] = i;
+  }
+  for(i = 0; i < j.segments.length; i++){
+    k = String(j.segments[i].f || "").toLowerCase();
+    map.push(byName.hasOwnProperty(k) ? byName[k] : -1);
+  }
+  return map;
+}
+function bglPosOf(workIdx){
+  for(var i = 0; i < BGL.workOf.length; i++){ if(BGL.workOf[i] === (workIdx | 0)) return i; }
+  return -1;
+}
+function bglSegStart(workIdx){
+  var p = bglPosOf(workIdx);
+  return p < 0 ? 0 : (Number(BGL.data.segments[p].start) || 0);
+}
+/* 只 seek、不 pause、不换源——这是"连播"和"一段一换"的关键差别 */
+function bglSeekAt(t){
+  var el = bglEl();
+  t = Math.max(0, Number(t) || 0);
+  BGL.prevCt = null;                              /* 跳变不算发声 */
+  if(el.readyState < 1){ BGL.pendSeek = t; return; }
+  try{ el.currentTime = t; BGL.pendSeek = null; }
+  catch(e){ BGL.pendSeek = t; }
+  BGL.seekAt = Date.now();
+}
+function bglBind(){
+  if(BGL.bind) return;
+  BGL.bind = 1;
+  var el = bglEl();
+  el.addEventListener("timeupdate", bglOnTime);
+  el.addEventListener("ended", bglOnEnd);
+  el.addEventListener("error", bglOnErr);
+  el.addEventListener("loadedmetadata", function(){
+    if(BGL.pendSeek != null){
+      var t = BGL.pendSeek; BGL.pendSeek = null;
+      try{ el.currentTime = t; }catch(e){}
+    }
+    if(BG.long && BG.playing && !BG.paused){ try{ el.play(); }catch(e){} }
+  });
+  el.addEventListener("play", function(){
+    if(BG.long && BG.playing){
+      try{ navigator.mediaSession.playbackState = "playing"; }catch(e){}
+    }
+  });
+  /* 后台被冻结期间不回调 timeupdate，回到前台按墙钟把真实发声时长补上，
+     否则"息屏听了半小时"回来只记几分钟，门槛与统计全错 */
+  document.addEventListener("visibilitychange", function(){
+    if(document.visibilityState === "hidden"){ BGL.hidAt = Date.now(); return; }
+    var gap = BGL.hidAt ? (Date.now() - BGL.hidAt) / 1000 : 0;
+    BGL.hidAt = 0;
+    if(!BG.long || !BG.playing || BG.paused) return;
+    if(gap >= 2){
+      BGL.prevCt = null;
+      var room = Math.max(0, BG.mins * 60 - bgElapsed());
+      BG.spoken += Math.min(gap, Math.max(0, room));
+      bglSyncFromElement();                       /* 回来时把段号/字幕对到真正在放的位置上 */
+      bgPaintClock();
+    }
+  });
+}
+/* 起播：整条音轨只在这里设置一次 src，之后全程 seek */
+function bglStart(workIdx){
+  if(!BG.playing || BG.paused || BG.mode !== "work") return;
+  if(!BGL.ready){
+    if(BGL.bad){ bgPlayChunkLegacy(); return; }
+    bglLoad(function(ok){
+      if(!BG.playing || BG.paused) return;
+      if(ok) bglStart(BG.idx);
+      else bgPlayChunkLegacy();                   /* 索引失败：老路子顶上 */
+    });
+    return;
+  }
+  var w = bgNormIdx(workIdx);
+  var pos = bglPosOf(w);
+  if(pos < 0){ bgPlayChunkLegacy(); return; }
+  var el = bglEl();
+  BG.long = 1;
+  BG.fadeReset = null;                            /* 老路子的淡出计时器不参与连播 */
+  BG.audio = el;                                  /* 暂停/停止/迷你条统一读它 */
+  BG.audioAbort = function(){ try{ el.pause(); }catch(e){} };  /* 停只暂停，不拆事件绑定 */
+  BG.seqToken++;
+  BG.speaking = 0;
+  if(BG.gapTimer){ clearTimeout(BG.gapTimer); BG.gapTimer = null; }
+  bglBind();
+  try{
+    el.playbackRate = Math.max(0.5, Math.min(2, Number(BG.rate) || 1));
+  }catch(e){}
+  /* 变速保音高：英语听力变速后不能变调，否则听感失真 */
+  try{ el.preservesPitch = true; }catch(e){}
+  try{ el.mozPreservesPitch = true; }catch(e){}
+  try{ el.webkitPreservesPitch = true; }catch(e){}
+  try{ el.volume = 1; }catch(e){}
+  if(String(el.src || "").indexOf("bg_all.mp3") < 0){
+    el.src = BGL.url;
+    BGL.pendSeek = Number(BGL.data.segments[pos].start) || 0;
+  }
+  BGL.cur = -1;
+  BGL.prevCt = null;
+  bglEnterSeg(w);
+  if(BGL.pendSeek == null) bglSeekAt(bglSegStart(w) + 0.01);
+  var pr = null;
+  try{ pr = el.play(); }
+  catch(e){ BGL.bad = 1; BG.long = 0; bgPlayChunkLegacy(); return; }
+  if(pr && pr.catch){
+    pr.catch(function(){
+      /* 被暂停/被抢占导致的 play 中断是正常的，不处理；长时间起不来再退回老路子 */
+      if(!BG.playing || BG.paused) return;
+      setTimeout(function(){
+        if(!BG.playing || BG.paused || !BG.long) return;
+        if(bglEl().paused && !bglEl().ended){
+          BGL.bad = 1; BG.long = 0;
+          bgPlayChunkLegacy();
+        }
+      }, 2500);
+    });
+  }
+  bgMetaSet();
+  bgPaintClock();
+  render();
+}
+/* 当前在放第几段（按长音轨的真实播放位置判定，不信任何计时器） */
+function bglFindPos(t){
+  var s = BGL.data.segments, lo = 0, hi = s.length - 1, mid;
+  if(t < s[0].start) return 0;
+  while(lo <= hi){
+    mid = (lo + hi) >> 1;
+    if(t < s[mid].start){ hi = mid - 1; }
+    else if(t >= s[mid].start + s[mid].dur){ lo = mid + 1; }
+    else { return mid; }
+  }
+  return Math.max(0, Math.min(s.length - 1, lo));
+}
+function bglSyncFromElement(){
+  if(!BGL.ready || !BG.long) return;
+  var el = bglEl(), t = el.currentTime;
+  if(!(t >= 0)) return;
+  var pos = bglFindPos(t);
+  if(pos >= 0 && BGL.workOf[pos] >= 0 && BGL.workOf[pos] !== BGL.cur){
+    bglEnterSeg(BGL.workOf[pos]);
+  }
+}
+/* 进段：字幕、目标词曝光、断点、锁屏标题。只更新必要节点，不整页 render（否则每段都重建 DOM） */
+function bglEnterSeg(w){
+  w = bgNormIdx(w);
+  if(w === BGL.cur) return;
+  BGL.cur = w;
+  BG.idx = w;
+  var seg = BG_WORK[w];
+  if(seg) BG.exposed += bgExpose(seg);
+  try{
+    bgMetaSet();
+    if(seg) bgSubSet("work", seg.t, seg.s, bgAccTag(seg) + (seg.wpm ? (" · " + seg.wpm + " wpm") : ""), w);
+  }catch(e){}
+  bgProgSave();
+  bgPaintClock();
+}
+function bglOnTime(){
+  if(!BGL.ready || !BG.long || !BG.playing || BG.paused) return;
+  var el = bglEl(), t = el.currentTime, s = BGL.data.segments;
+  /* v32：真实发声时长按"播放位置推进"累计（老路子靠段级回调记账，连播没有段级回调）。
+     暂停、跳段、切后台都不计：暂停不触发 timeupdate，跳变的差值一眼能看出（>1.5s 或负值），
+     后台那段由 visibilitychange 里按墙钟补。折算回墙钟秒，1.25x 听 10 秒记 8 秒 */
+  var dt = (BGL.prevCt == null) ? 0 : (t - BGL.prevCt);
+  BGL.prevCt = t;
+  if(dt > 0 && dt < 1.5){
+    BG.spoken += dt / Math.max(0.5, Number(el.playbackRate) || 1);
+  }
+  var pos = bglFindPos(t);
+  var w = BGL.workOf[pos];
+  if(w >= 0 && w !== BGL.cur){
+    bglEnterSeg(w);
+    /* 口音集合筛选：下一段不在当前集合里，就直接 seek 过去（仍是连播，不暂停） */
+    var pool = bgWorkPool();
+    if(pool.length < BG_WORK.length){
+      var nx = (pos + 1 < BGL.workOf.length) ? BGL.workOf[pos + 1] : -1;
+      if(nx < 0 || pool.indexOf(nx) < 0){
+        var g = bgPoolGet(bgPoolPosOf(w) + 1);
+        var tgt = g ? g.idx : pool[0];
+        var p2 = bglPosOf(tgt);
+        if(p2 >= 0) bglSeekAt(Number(s[p2].start) + 0.01);
+      }
+    }
+  }
+  /* 整条放完 → 回到当前集合第一段，继续放（60 分钟档会循环两轮多） */
+  var last = s[s.length - 1];
+  if(t >= Number(last.start) + Number(last.dur) - 0.08){
+    if(Date.now() - BGL.seekAt > 1500){
+      BG.rounds++;
+      var p3 = bglPosOf(bgWorkPool()[0]);
+      if(p3 >= 0) bglSeekAt(Number(s[p3].start) + 0.01);
+    }
+  }
+  /* 时间条与断点：3 秒一次，够用且不浪费 */
+  if(Date.now() - BGL.saveAt > 3000){
+    BGL.saveAt = Date.now();
+    bgProgSave();
+    bgPaintClock();
+  }
+}
+function bglOnEnd(){
+  /* ended 理论上不会出现（尾部我们自己 seek 回起点），真出现就原地重播，绝不停 */
+  if(!BG.long || !BG.playing || BG.paused) return;
+  var p = bglPosOf(bgWorkPool()[0]);
+  if(p >= 0) bglSeekAt(Number(BGL.data.segments[p].start) + 0.01);
+  try{ bglEl().play(); }catch(e){}
+}
+function bglOnErr(){
+  /* 长音轨坏了：立刻退回分段播放，宁可多段接力也不要静音 */
+  if(BG.long && BG.playing && !BG.paused){
+    BGL.bad = 1; BG.long = 0;
+    bgPlayChunkLegacy();
+  }
+}
+/* 暂停：只暂停，不卸载、不清断点 */
+function bglPause(){
+  var el = bglEl();
+  try{ el.pause(); }catch(e){}
+  try{ if("mediaSession" in navigator) navigator.mediaSession.playbackState = "paused"; }catch(e){}
+}
+/* 继续：从当前播放位置接着放，不回到段首（这也是音乐播放器的行为） */
+function bglResume(){
+  var el = bglEl();
+  if(!BGL.ready){ bglStart(BG.idx); return; }
+  if(el.paused){ try{ el.play(); }catch(e){} }
+  bglSyncFromElement();
+  bgMetaSet();
+  bgPaintClock();
+  render();
+}
+/* 跳段：seek 即可，不用重载整条 */
+function bglJump(idx){
+  var w = bgNormIdx(idx);
+  BGL.cur = -1;
+  BG.idx = w;
+  bglEnterSeg(w);
+  bglSeekAt(bglSegStart(w) + 0.01);
+  var el = bglEl();
+  if(el.paused && BG.playing && !BG.paused){ try{ el.play(); }catch(e){} }
+  bgPaintClock();
+  render();
+}
+/* 收尾：解除连播身份，元素停掉 */
+function bglStop(){
+  var el = BGL.el;
+  if(el){ try{ el.pause(); }catch(e){} }
+  BGL.cur = -1;
+  BGL.seekAt = 0;
+  BGL.pendSeek = null;
+  BGL.prevCt = null;
+}
+/* 语速：连播里改语速不用重载，直接改 playbackRate */
+function bglSetRate(r){
+  var el = bglEl();
+  try{ el.playbackRate = Math.max(0.5, Math.min(2, Number(r) || 1)); }catch(e){}
+}
+
 /* ===== v26：睡前听的播放链 =====
    池子按轮次缓存：同一轮内 A/D/B 句子与 C 段顺序固定（断点/回听都稳定），换轮才重新组池。
    bgSaySeq / bgPlayMp3 自带 seqToken 校验，暂停、停止、跳轮都会自然中断，不需要外部再管。 */
@@ -13142,6 +13469,7 @@ function bgSleepPoolOf(){
 /* v27：当前是否正有一句在出声——到点收尾靠它判断「当前句念完没有」 */
 function bgSleepBusy(){
   if(BG.speaking) return true;
+  if(BG.long && BGL.ready && BGL.el && BGL.el.paused === false) return true;
   if(BG.audio && BG.audio.paused === false) return true;
   return false;
 }
@@ -13359,6 +13687,14 @@ function bgMetaSet(){
    跳段只改"从哪一段接着放"，本次已累计的发声时长一分不动：不重复计，也不清零。 */
 function bgJumpTo(idx){
   if(!BG.playing || BG.mode !== "work") return;
+  /* v32：连播模式跳段只是 seek，不换源、不中断整条音轨 */
+  if(BG.long && BGL.ready && !BGL.bad){
+    BG.idx = bgNormIdx(idx);
+    BG.fails = 0; BG.paused = false;
+    bglJump(BG.idx);
+    bgProgSave();
+    return;
+  }
   BG.seqToken++;                                  /* 作废当前 mp3 与朗读链，防双播 */
   if(BG.gapTimer){ clearTimeout(BG.gapTimer); BG.gapTimer = null; }
   if(BG.fadeReset){ try{ BG.fadeReset(); }catch(e){} }
@@ -13401,6 +13737,7 @@ function bgStop(complete){
   if(BG.timer){ clearInterval(BG.timer); BG.timer = null; }
   if(BG.gapTimer){ clearTimeout(BG.gapTimer); BG.gapTimer = null; }
   BG.mp3Retry = 0;                                            /* v28：停就清掉息屏自动重试标记 */
+  if(BG.long){ bglStop(); BG.long = 0; }                      /* v32：连播身份解除，音轨暂停留存 */
   if(BG.fadeReset){ try{ BG.fadeReset(); }catch(e){} }        /* v23：清掉段间淡出定时器 */
   if(BG.audio && BG.audioAbort){ try{ BG.audioAbort(); }catch(e){} }
   if(BG.audio){ try{ BG.audio.pause(); }catch(e){} BG.audio = null; }
