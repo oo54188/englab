@@ -3986,6 +3986,8 @@ function loadDB(){
       DB.dictSent = (o.dictSent instanceof Array) ? o.dictSent.slice(-30) : [];
       /* v23：背景听断点，老版本没有这个键，交给下面补齐段兜底 */
       DB.bgProg = (o.bgProg && typeof o.bgProg==="object" && !(o.bgProg instanceof Array)) ? o.bgProg : null;
+      /* v29：背景听字幕历史（最近 40 条），不加载的话一刷新字幕就空了 */
+      DB.bgSub = (o.bgSub instanceof Array) ? o.bgSub.slice(-40) : [];
     }
     if(!DB.err || typeof DB.err!=="object") DB.err = null;
     if(!DB.prodLog || !(DB.prodLog instanceof Array)) DB.prodLog = [];
@@ -4006,6 +4008,9 @@ function loadDB(){
     if(!DB.bgProg || typeof DB.bgProg!=="object" || DB.bgProg instanceof Array) DB.bgProg={ work:{ idx:0, d:"" }, sleep:{ idx:0, d:"" } };
     if(!DB.bgProg.work || typeof DB.bgProg.work!=="object") DB.bgProg.work={ idx:0, d:"" };
     if(!DB.bgProg.sleep || typeof DB.bgProg.sleep!=="object") DB.bgProg.sleep={ idx:0, d:"" };
+/* v29：字幕历史兜底，新用户/老版本数据都不会让 bgSub 是 undefined */
+if(!(DB.bgSub instanceof Array)) DB.bgSub = [];
+if(DB.bgSub.length > 40) DB.bgSub = DB.bgSub.slice(-40);
     DB.bgProg = bgProgMerge(DB.bgProg, {});
     /* v24：有效门槛与没听清标记的结构补齐，老数据/非法值一律回落 */
     DB.bgGoal = bgGoalNorm(DB.bgGoal);
@@ -4979,6 +4984,174 @@ function ttsAvail(){
 }
 function hasLocalEn(){ return enVoices().length>0; }
 
+/* ===== v29：同一时间只允许一路出声 ==========================================
+   痛点：精听/单词/例句在用 speechSynthesis 或网络语音念，背景听那边在放整段 mp3，
+   两路能同时响；点了新的播放，旧的那路还在响。
+   做法：朗读侧和背景听侧各有一个"抢占"入口，谁最后被点谁出声，另一路立刻停手。
+   · audClaimRead()：朗读要开口 → 背景听停（静默停，断点已落盘，回来点继续能续）
+   · audClaimBg()：背景听要开口 → 整条朗读会话停（SPK.seq、当前这句、网络音频一次清）
+   · AUD.hold：背景听内部的 TTS 也走 speak()，打这个标记，避免自己把自己停掉 */
+var AUD = { hold:0, silent:0 };
+function audStopReading(){
+  try{ spSeqStop(); }catch(e){}
+  try{ stopSpeak(); }catch(e){}
+  try{ if(NET.playing) netStop(); }catch(e){}
+  try{ NET.playing = false; }catch(e){}
+}
+function audClaimRead(){
+  if(AUD.hold) return false;
+  var hit = false;
+  if(typeof BG !== "undefined" && BG && BG.playing){
+    /* silent：只停声不重绘——用户是在别的页面点播放，不能把人家当前界面刷掉 */
+    AUD.silent++;
+    try{ bgStop(false); }
+    catch(e){}
+    finally{ AUD.silent = Math.max(0, AUD.silent - 1); }
+    hit = true;
+  }
+  audStopNativeAudio(null);      /* 内容自带的音频控件也要让路 */
+  if(hit) toast("背景听已停（同一时间只放一路），回来点继续能接着听");
+  return hit;
+}
+function audClaimBg(){
+  audStopReading();
+}
+
+/* v29：页面里还有内容自带的原生 <audio controls>（精听/词典里的音频链接），
+   它由浏览器自己播，JS 没有"用户点了播放"的回调，只能监听 play 事件来抢占。
+   背景听与朗读用的那两个 audio 元素是自己人，跳过去不处理。 */
+function audIsOwnAudio(el){
+  if(!el) return false;
+  try{ if(typeof NET !== "undefined" && NET && el === NET.el) return true; }catch(e){}
+  try{ if(typeof BG !== "undefined" && BG && el === BG.audioEl) return true; }catch(e){}
+  try{ if(typeof BG !== "undefined" && BG && el === BG.audio) return true; }catch(e){}
+  return false;
+}
+function audStopNativeAudio(skip){
+  try{
+    var els = document.querySelectorAll("audio"), i, a;
+    for(i = 0; i < els.length; i++){
+      a = els[i];
+      if(a === skip || audIsOwnAudio(a)) continue;
+      if(!a.paused){ try{ a.pause(); }catch(e){} }
+    }
+  }catch(e){}
+}
+function audClaimNative(el){
+  if(audIsOwnAudio(el)) return;
+  audStopNativeAudio(el);                    /* 其它原生音频一起停，只留刚点的这一路 */
+  if(typeof BG !== "undefined" && BG && BG.playing){
+    AUD.silent++;
+    try{ bgStop(false); }catch(e){}
+    finally{ AUD.silent = Math.max(0, AUD.silent - 1); }
+    toast("背景听已停（同一时间只放一路）");
+  }
+  try{ spSeqStop(); }catch(e){}
+}
+try{
+  document.addEventListener("play", function(ev){
+    var t = ev && ev.target;
+    if(!t || String(t.tagName || "").toUpperCase() !== "AUDIO") return;
+    audClaimNative(t);
+  }, true);
+}catch(e){}
+
+/* ===== v29：字幕 ============================================================
+   听不懂时能回头看一眼：工作听按段给全文（段标题 + 每句），睡前听给当前这一句，
+   每条进历史（最多 40 条，落 localStorage），停止后照样能翻。 */
+var SUBX = { cur:null, open:0 };
+function bgSubLogArr(){
+  if(!(DB.bgSub instanceof Array)) DB.bgSub = [];
+  return DB.bgSub;
+}
+function bgSubTimeCn(ts){
+  try{
+    var d = new Date(ts || Date.now());
+    return ("0" + d.getHours()).slice(-2) + ":" + ("0" + d.getMinutes()).slice(-2);
+  }catch(e){ return ""; }
+}
+function bgSubSame(a, b){
+  if(!a || !b) return false;
+  return a.mode === b.mode && String(a.title || "") === String(b.title || "") &&
+         (a.lines || []).join("\n") === (b.lines || []).join("\n");
+}
+function bgSubSet(mode, title, lines, tag, idx){
+  var arr = [];
+  (lines instanceof Array ? lines : []).forEach(function(x){
+    var t = String(x == null ? "" : x).trim();
+    if(t) arr.push(t);
+  });
+  var e = { ts:Date.now(), mode:mode, title:String(title || "").trim(), lines:arr,
+            tag:String(tag || ""), idx:(idx == null ? null : (idx | 0)) };
+  if(!arr.length && !e.title) return;
+  SUBX.cur = e;
+  var log = bgSubLogArr();
+  var last = log[log.length - 1];
+  if(bgSubSame(last, e)){
+    last.ts = e.ts;                              /* 同一段重复放：只更新时间，不堆重复条目 */
+  } else {
+    log.push(e);
+    while(log.length > 40) log.shift();
+    try{ saveDB(); }catch(err){}
+  }
+  bgSubRender();
+}
+function bgSubLinesHtml(lines){
+  if(!lines || !lines.length) return '<div class="tiny muted">这一段没有文本。</div>';
+  var h = '', i;
+  for(i = 0; i < lines.length; i++){
+    h += '<div style="padding:4px 0;line-height:1.62">' +
+         '<span class="tiny muted" style="margin-right:7px">' + (i + 1) + '</span>' + esc(lines[i]) + '</div>';
+  }
+  return h;
+}
+function bgSubHistHtml(){
+  var log = bgSubLogArr();
+  if(!log.length) return '';
+  var n = log.length;
+  var h = '<div style="margin-top:11px;border-top:1px solid rgba(127,127,127,.28);padding-top:8px">' +
+          '<div class="row" style="align-items:center">' +
+          '<div style="flex:1" class="tiny muted">往期字幕 ' + n + ' 条</div>' +
+          '<button class="btn sm ghost" onclick="bgSubToggle()">' + (SUBX.open ? "收起" : "回头看") + '</button>' +
+          '</div>';
+  if(SUBX.open){
+    var showN = Math.min(n, 20), i, e;
+    for(i = n - 1; i >= n - showN; i--){
+      e = log[i];
+      h += '<div style="margin-top:9px">' +
+           '<div class="tiny" style="opacity:.8">' + bgSubTimeCn(e.ts) + ' · ' +
+           (e.mode === "work" ? "工作听" : "睡前听") + (e.tag ? ' · ' + esc(e.tag) : '') + '</div>' +
+           (e.title ? '<div style="font-weight:700;margin-top:2px">' + esc(e.title) + '</div>' : '') +
+           '<div>' + bgSubLinesHtml(e.lines) + '</div>' +
+           (e.idx != null && e.mode === "work" && BG.playing && BG.mode === "work"
+             ? '<div style="margin-top:5px"><button class="btn sm ghost" onclick="bgJumpTo(' + e.idx + ')">跳到这段听</button></div>'
+             : '') +
+           '</div>';
+    }
+    if(n > showN) h += '<div class="tiny muted" style="margin-top:7px">只列最近 ' + showN + ' 条。</div>';
+  }
+  h += '</div>';
+  return h;
+}
+function bgSubInner(){
+  var cur = SUBX.cur;
+  var h = '<div class="row" style="align-items:center">' +
+          '<div style="flex:1;font-weight:750">字幕' + (cur && cur.title ? ' · ' + esc(cur.title) : '') + '</div>' +
+          (cur && cur.tag ? '<span class="tiny muted">' + esc(cur.tag) + '</span>' : '') +
+          '</div>';
+  if(cur) h += '<div style="margin-top:7px">' + bgSubLinesHtml(cur.lines) + '</div>';
+  else h += '<div class="tiny muted" style="margin-top:6px">开始后这里显示正在念的原文。</div>';
+  h += bgSubHistHtml();
+  return h;
+}
+function bgSubToggle(){ SUBX.open = SUBX.open ? 0 : 1; bgSubRender(); }
+function bgSubRender(){
+  var el = document.getElementById("bgSubCard");
+  if(el) el.innerHTML = bgSubInner();
+  var el2 = document.getElementById("bgSubCardIdle");
+  if(el2) el2.innerHTML = bgSubHistHtml();
+}
+
 function stopSpeak(){
   netStop();
   NET.playing=false;
@@ -4991,6 +5164,7 @@ function speak(text, rate, cb){
   var t=String(text==null?"":text).trim();
   if(!t){ if(cb) cb(false); return; }
   stopSpeak();
+  audClaimRead();          /* v29：朗读一开口，背景听必须让路（只放一路） */
   var r=rate||DB.rate||0.92, mode=ttsMode();
   var nv=neuralVoice();
   /* 只剩"系统语音"这条路时以前完全不占常亮：本地朗读一息屏，JS 被挂起就断在半句。
@@ -11921,7 +12095,10 @@ function bgSaySeq(list, rate, gap, done){
     }
     wd = setTimeout(function(){ settle(false); }, estMs);
     BG.speaking = 1;                          /* v27：正在出声，到点也不打断这一句 */
-    speak(txt, r, function(ok){ settle(ok !== false); });
+    /* v29：这是背景听自己的朗读，按住仲裁标记，别让它把背景听自己停掉 */
+    AUD.hold++;
+    try{ speak(txt, r, function(ok){ settle(ok !== false); }); }
+    finally{ AUD.hold = Math.max(0, AUD.hold - 1); }
   }
   next();
 }
@@ -12403,7 +12580,7 @@ function bgStart(fromHead){
     return;
   }
   BG.sq = null;                                   /* v26：每次起播重新组池 */
-  stopSpeak();
+  audClaimBg();                                    /* v29：背景听独占出声，精听/单词那一路立刻停 */
   BG.seqToken++;
   var m = (BG.mode === "sleep") ? "sleep" : "work";
   var rs = bgProgPick(m, !!fromHead);             /* v23：先取上次听到哪，再决定从哪段开 */
@@ -12456,6 +12633,7 @@ function bgResume(){
   if(!BG.playing || !BG.paused) return;
   BG.pausedMs += Date.now() - BG.pauseAt;
   BG.pauseAt = 0; BG.paused = false; BG.fails = 0; BG.mp3Retry = 0;
+  audClaimBg();                                   /* v29：继续播也是抢占，精听那一路要停 */
   render();
   bgWakeOn();
   bgMetaSet();                                    /* 恢复播放，锁屏状态与段标题重新对上 */
@@ -12471,6 +12649,8 @@ function bgPlayChunk(){
   seg = BG_WORK[BG.idx];
   list = seg.s; rate = BG.rate; gap = 4500;
   bgMetaSet();                                    /* v23：每进新段，锁屏标题跟着换 */
+  /* v29：一进新段就把字幕换成这一段，听不懂时随时回头看 */
+  try{ bgSubSet("work", seg.t, seg.s, bgAccTag(seg) + (seg.wpm ? (' · ' + seg.wpm + ' wpm') : ''), BG.idx); }catch(e){}
   /* 一段放完就接下一段，否则语音流断在半空、计时还在走 */
   function afterChunk(){
     if(!BG.playing || BG.paused) return;
@@ -12549,6 +12729,15 @@ function bgSleepPlayCur(start){
   }
   bgMetaSet();                                     /* v23 行为不变：锁屏标题显示「睡前听 · 第 N 轮」 */
   var cur = pk.items[it];
+  /* v29：睡前听的字幕——整段项给段全文，句子项给这一句（听不懂能回头看） */
+  try{
+    if(cur.k === "mp3"){
+      var _sg = cur.seg || BG_WORK[cur.idx] || null;
+      if(_sg) bgSubSet("sleep", _sg.t, _sg.s, "整段 · 慢放", cur.idx);
+    } else {
+      bgSubSet("sleep", "今天的句子", [cur.x], "逐句 · 慢放", null);
+    }
+  }catch(e){}
   /* v28：息屏/后台时系统语音（TTS）一定会被系统挂起。凡是句子项，改成插播一段预生成音频顶上：
      声音不断、内容持续更换；回到前台后照原计划接着念句子，进度不丢。
      （只"跳过句子"的做法实测会让睡前听在某一段之后直接停住，等于息屏就没声） */
@@ -12559,6 +12748,7 @@ function bgSleepPlayCur(start){
       toast("息屏时只能放预生成的整段音频，这一轮没有可用音频，已暂停。亮屏后点继续，接着念今天的句子");
       return;
     }
+    try{ if(bs.seg) bgSubSet("sleep", bs.seg.t, bs.seg.s, "息屏顶播 · 慢放", null); }catch(e){}
     bgPlayMp3(bs.a, BG_SLEEP_C_RATE, 400,
       function(){ if(BG.playing && !BG.paused) bgSleepPlayCur(it + 1); },
       function(){ if(BG.playing && !BG.paused) bgSleepPlayCur(it + 1); });
@@ -12776,7 +12966,7 @@ function bgStop(complete){
   BG.playing = false; BG.paused = false; BG.pausedMs = 0; BG.pauseAt = 0;
   BG.elapsed = el;
   BG.remain = Math.max(0, BG.mins * 60 - el);
-  if(!wasPlaying && !complete){ render(); return; }
+  if(!wasPlaying && !complete){ if(!AUD.silent) render(); return; }
 
   var counted = sp >= bgGoalNorm(DB.bgGoal);   /* v24：门槛读 DB.bgGoal（默认 600），仍只认真实发声时长 */
   if(sp >= 60){
@@ -12798,7 +12988,7 @@ function bgStop(complete){
     saveDB();
   }
   BG.last = { sec: sp, wall: el, counted: counted, mode: BG.mode };
-  render();
+  if(!AUD.silent) render();
 }
 
 function htmlBg(){
@@ -12863,12 +13053,19 @@ function htmlBg(){
              ? '句间停 8 秒，语速从 ' + BG.rate + 'x 起每轮降 0.05，最低 0.68x；最后 2 分钟句间拉到 20 秒并再降一档。到 ' + BG.mins + ' 分钟按「到点自动收尾」的设置走：开启时不再开新句、当前句念完即停并释放屏幕常亮；关闭时只提示已到点，继续放到你手动停。'
              : '段间停 4.5 秒，' + bgPoolLen() + ' 段循环（当前「' + bgAccCn(DB.bgAcc) + '」集合，全库 ' + BG_WORK.length + ' 段）。每段音频已预生成，整段本地播放、断网也能听。计时按真实发声算：满 ' + bgGoalMinText() + ' 才记为一次有效背景听，暂停和静音挂机都不计入。') +
          '</div></div>';
+    /* v29：字幕卡——正在放的原文（整段全文）+ 往期回看 */
+    h += '<div class="card flat" id="bgSubCard" style="margin-top:10px">' + bgSubInner() + '</div>';
     h += bgMarkListHtml();                     /* v24：播放中也能看到清单并点开回听 */
     return h;
   }
 
   h += '<div class="hero"><div class="kicker">Ambient Listening</div><h1>背景听</h1>' +
        '<p>工作、通勤、睡前用的长时段听力。它不算精听，只保证耳朵每天有真实语音流过。</p></div>';
+
+  /* v29：没在放的时候，上次听过的原文也能翻回来查（字幕不只播放时能看） */
+  if(bgSubLogArr().length){
+    h += '<div class="card flat" id="bgSubCardIdle" style="margin-top:10px">' + bgSubHistHtml() + '</div>';
+  }
 
   /* v23：入口就说明"上次听到哪"，别让人以为点开始又是从第一段放 */
   var _pg = (DB.bgProg && DB.bgProg.work) ? DB.bgProg.work : null;
