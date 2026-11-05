@@ -1,5 +1,5 @@
 /* EngLab Service Worker — 让应用断网也能打开 */
-const VERSION = 'englab-v8';
+const VERSION = 'englab-v27';   /* 改过 audio/bg 下的 mp3 必须一起改这里，否则用户拿到旧缓存 */
 const CORE = [
   './',
   './index.html',
@@ -8,7 +8,18 @@ const CORE = [
   './icon-512.png',
   './apple-touch-icon.png',
   './favicon-32.png',
-  './data/daily.json'
+  './data/daily.json',
+  /* 背景听工作材料（v25 共 62 段：美音 bg01–bg50、英/澳/印 bg51–bg62）。
+     只把各口音的第一段常驻，保证首次离线切口音也有声音；其余听过的按需缓存。 */
+  './audio/bg/bg01.mp3',
+  './audio/bg/bg02.mp3',
+  './audio/bg/bg03.mp3',
+  './audio/bg/bg04.mp3',
+  './audio/bg/bg05.mp3',
+  './audio/bg/bg06.mp3',
+  './audio/bg/bg51.mp3',
+  './audio/bg/bg52.mp3',
+  './audio/bg/bg53.mp3'
 ];
 
 self.addEventListener('install', (e) => {
@@ -66,6 +77,31 @@ self.addEventListener('fetch', (e) => {
           return res;
         })
         .catch(() => caches.match(req))
+    );
+    return;
+  }
+
+  // 背景听材料（audio/bg/*.mp3）：缓存优先，听一次就够离线用
+  if (url.pathname.indexOf('audio/bg/') >= 0) {
+    e.respondWith(
+      caches.match(req, { ignoreSearch: true }).then((hit) => {
+        if (hit) return hit;
+        return fetch(req).then((res) => {
+          const save = (r) => {
+            if (!r || r.status !== 200) return;
+            const cp = r.clone();
+            caches.open(VERSION).then((c) => c.put(req, cp));
+          };
+          if (res.status === 200) save(res);
+          // 播放器会带 Range 请求，此时服务器回 206 不能直接存；用整段请求补一份完整缓存
+          else if (res.status === 206) {
+            fetch(url.origin + url.pathname)
+              .then((full) => save(full))
+              .catch(() => {});
+          }
+          return res;
+        }).catch(() => caches.match(req, { ignoreSearch: true }));
+      })
     );
     return;
   }
