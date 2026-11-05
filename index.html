@@ -11561,13 +11561,13 @@ function htmlInterp(){
        '<p>交传练准确，同传练抗压。两种都靠材料，不靠感觉。</p></div>';
 
     h+='<div class="grid2" style="gap:10px">'+
-      '<div class="card tight" style="margin:0;cursor:pointer" onclick="iprPick(\'ci\')>'+
+      '<div class="card tight" style="margin:0;cursor:pointer" onclick="iprPick(\'ci\')">'+
         '<div class="tag">交替传译</div>'+
         '<div style="font-weight:750;font-size:15px;margin-top:6px">听一段，译一段</div>'+
         '<div class="tiny muted" style="margin-top:4px;line-height:1.6">可以记笔记、可以重听。评分看准确和完整。</div>'+
         '<div class="tiny" style="margin-top:8px;color:var(--green-d);font-weight:800">已练 '+(st.ci.n||0)+' 组　'+(Math.round((st.ci.sec||0)/60))+' 分钟</div>'+
       '</div>'+
-      '<div class="card tight" style="margin:0;cursor:pointer" onclick="iprPick(\'si\')>'+
+      '<div class="card tight" style="margin:0;cursor:pointer" onclick="iprPick(\'si\')">'+
         '<div class="tag b">同声传译</div>'+
         '<div style="font-weight:750;font-size:15px;margin-top:6px">边听边译，不暂停</div>'+
         '<div class="tiny muted" style="margin-top:4px;line-height:1.6">延迟开口，跟住语速。先求跟上，再求准确。</div>'+
@@ -11590,7 +11590,7 @@ function htmlInterp(){
   if(CI.stage==="pick" || SI.stage==="pick"){
     var isCI = (INTERP_MODE!=="si");
     h+='<div class="hd" style="margin-top:8px"><h3>'+(isCI?"交传 · 选材料":"同传 · 选材料")+'</h3>'+
-       '<span class="right"><button class="mini" onclick="iprHome()>返回</button></span></div>';
+       '<span class="right"><button class="mini" onclick="iprHome()">返回</button></span></div>';
     for(var i=0;i<INTERP_SEGS.length;i++){
       var s=INTERP_SEGS[i];
       h+='<div class="card tight" style="cursor:pointer" onclick="'+(isCI?('ciStart('+i+')'):('siStart('+i+')'))+'">'+
@@ -11662,7 +11662,7 @@ function htmlInterp(){
            '</div></div>';
       }
       h+='<button class="btn block big" style="margin-top:16px" onclick="ciStart(CI.seg)">同材料再来一遍</button>'+
-         '<button class="btn block gray" style="margin-top:8px" onclick="iprPick(\'ci\')>换材料</button>'+
+         '<button class="btn block gray" style="margin-top:8px" onclick="iprPick(\'ci\')">换材料</button>'+
          '</div>';
       return h;
     }
@@ -11735,7 +11735,7 @@ function htmlInterp(){
            '</div></div></div>';
       }
       h+='<button class="btn block big" style="margin-top:16px" onclick="siStart(SI.seg)">同材料再来一遍</button>'+
-         '<button class="btn block gray" style="margin-top:8px" onclick="iprPick(\'si\')>换材料</button>'+
+         '<button class="btn block gray" style="margin-top:8px" onclick="iprPick(\'si\')">换材料</button>'+
          '</div>';
       return h;
     }
