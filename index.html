@@ -5055,6 +5055,33 @@ try{
     audClaimNative(t);
   }, true);
 }catch(e){}
+/* v29：document 上的 play 监听只抓得到「已经插进页面」的 audio。脚本自己 new Audio() 造出来、
+   还没挂到 DOM 上的音频，事件到不了 document（play 不冒泡、元素又不在树里）——
+   这类播放同样要抢，所以在 play() 方法上再拦一道。自己人（朗读 NET、背景听 BG）直接放行。*/
+try{
+  if(typeof HTMLMediaElement !== "undefined" && HTMLMediaElement.prototype &&
+     HTMLMediaElement.prototype.play && !HTMLMediaElement.prototype.__v29hooked){
+    var _mediaPlay = HTMLMediaElement.prototype.play;
+    HTMLMediaElement.prototype.play = function(){
+      try{ if(String(this.tagName||"").toUpperCase() === "AUDIO") audClaimNative(this); }catch(e){}
+      return _mediaPlay.apply(this, arguments);
+    };
+    HTMLMediaElement.prototype.__v29hooked = 1;
+  }
+}catch(e){}
+try{
+  if(typeof window.Audio === "function" && !window.__v29AudioHooked){
+    var _AudioCtor = window.Audio;
+    var _AudioWrap = function(){
+      var el = new _AudioCtor(arguments.length ? arguments[0] : undefined);
+      try{ el.addEventListener("play", function(){ audClaimNative(el); }, false); }catch(e){}
+      return el;
+    };
+    _AudioWrap.prototype = _AudioCtor.prototype;
+    window.Audio = _AudioWrap;
+    window.__v29AudioHooked = 1;
+  }
+}catch(e){}
 
 /* ===== v29：字幕 ============================================================
    听不懂时能回头看一眼：工作听按段给全文（段标题 + 每句），睡前听给当前这一句，
