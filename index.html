@@ -12031,6 +12031,22 @@ function bgPlayMp3(src, rate, gap, done, fallback){
     }
     if(BG.fails >= 3){
       BG.fails = 0;
+      if(bgHidden()){
+        /* v28：息屏时没人能点「继续」，网络抖一下就永久静音——改成 20 秒后自动重试，
+           直到放出声或用户自己停，绝不停在静音状态不动 */
+        if(!BG.mp3Retry){
+          BG.mp3Retry = 1;
+          toast("息屏时音频连着几段没加载上，20 秒后自动重试；亮屏后可手动继续");
+        }
+        if(BG.gapTimer){ clearTimeout(BG.gapTimer); }
+        BG.gapTimer = setTimeout(function(){
+          BG.gapTimer = null;
+          if(!BG.playing || BG.paused) return;
+          if(BG.mode === "sleep") bgSleepPlayCur(BG.sq ? BG.sq.p : 0);
+          else bgPlayChunk();
+        }, 20000);
+        return;
+      }
       toast("语音连着几声没发出来，已暂停。检查网络，或在设置里换成系统语音");
       bgPause();
     }
@@ -12439,7 +12455,7 @@ function bgPause(){
 function bgResume(){
   if(!BG.playing || !BG.paused) return;
   BG.pausedMs += Date.now() - BG.pauseAt;
-  BG.pauseAt = 0; BG.paused = false; BG.fails = 0;
+  BG.pauseAt = 0; BG.paused = false; BG.fails = 0; BG.mp3Retry = 0;
   render();
   bgWakeOn();
   bgMetaSet();                                    /* 恢复播放，锁屏状态与段标题重新对上 */
@@ -12749,6 +12765,7 @@ function bgStop(complete){
   BG.speaking = 0;
   if(BG.timer){ clearInterval(BG.timer); BG.timer = null; }
   if(BG.gapTimer){ clearTimeout(BG.gapTimer); BG.gapTimer = null; }
+  BG.mp3Retry = 0;                                            /* v28：停就清掉息屏自动重试标记 */
   if(BG.fadeReset){ try{ BG.fadeReset(); }catch(e){} }        /* v23：清掉段间淡出定时器 */
   if(BG.audio && BG.audioAbort){ try{ BG.audioAbort(); }catch(e){} }
   if(BG.audio){ try{ BG.audio.pause(); }catch(e){} BG.audio = null; }
