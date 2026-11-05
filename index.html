@@ -5192,10 +5192,25 @@ function bgSubLinesHtml(lines){
   if(!lines || !lines.length) return '<div class="tiny muted">这一段没有文本。</div>';
   var h = '', i;
   for(i = 0; i < lines.length; i++){
-    h += '<div style="padding:4px 0;line-height:1.62">' +
+    /* v34：带 data-bgl，供 mpSync 把「正在念的那一句」高亮出来——
+       光把 4–6 行整段列出来、却不标当前句，人耳听到第 3 句、眼睛还停在第一行，就是「对不上」 */
+    h += '<div data-bgl="' + i + '" style="padding:4px 0;line-height:1.62">' +
          '<span class="tiny muted" style="margin-right:7px">' + (i + 1) + '</span>' + esc(lines[i]) + '</div>';
   }
   return h;
+}
+/* v34：字幕卡上按当前句高亮（只在亮屏时有意义，息屏 mpSync 直接 return） */
+function bgSubHiCard(k){
+  var card = document.getElementById("bgSubCard");
+  if(!card) return;
+  var rows = card.querySelectorAll("[data-bgl]");
+  for(var i = 0; i < rows.length; i++){
+    var on = (i === k);
+    rows[i].style.background = on ? "rgba(255,196,0,.20)" : "";
+    rows[i].style.fontWeight = on ? "800" : "";
+    rows[i].style.borderRadius = on ? "7px" : "";
+    rows[i].style.transition = "background .15s";
+  }
 }
 function bgSubHistHtml(){
   var log = bgSubLogArr();
@@ -5242,6 +5257,7 @@ function bgSubRender(){
   if(el) el.innerHTML = bgSubInner();
   var el2 = document.getElementById("bgSubCardIdle");
   if(el2) el2.innerHTML = bgSubHistHtml();
+  if(typeof MP !== "undefined" && MP) MP.cardHi = -1;   /* v34：重绘后让下一帧 mpSync 点亮当前句 */
 }
 
 /* ===== v30：迷你播放条 + 全屏字幕页 =====
@@ -5285,12 +5301,31 @@ function mpKeyOf(){
 }
 /* 句级时间轴：预生成 mp3 没有逐句时间戳，只能按词数比例切分整段时长。
    比例估算不是精确对齐，但足够让高亮跟住人耳听到的位置，也不影响任何记账。 */
+/* v34：当前音频元素「正在播的那一段」在媒体里的窗口。
+   长音轨（v32 工作听 / v33 睡前铺底）里 a.duration 是整条 bg_all.mp3 的 24 分钟，
+   字幕却只有当前这一段 4–6 行；若按整条时长切句，句号、高亮、点句跳听会全部错到整条音轨上
+   （听到第 2 句、高亮还停在第 1 句），表现就是用户说的「声音和字幕对不上」。
+   base/dur 一律用媒体绝对秒，非长音轨时 base=0、dur=元素自身时长。 */
+function mpWin(a){
+  var dur = (a && isFinite(a.duration)) ? a.duration : 0;
+  var base = 0;
+  if(BG.long && a && a === BGL.el && BGL.ready && BGL.cur >= 0 && BGL.data && BGL.data.segments){
+    var p = bglPosOf(BGL.cur), sg = (p >= 0) ? BGL.data.segments[p] : null;
+    if(sg && Number(sg.dur) > 0){ base = Number(sg.start) || 0; dur = Number(sg.dur); }
+  } else {
+    /* 非长音轨（单段 mp3 顶播）：以字幕自己那条的段时长为准，元素 duration 未就绪时也有值 */
+    var ci = (SUBX.cur && SUBX.cur.idx != null) ? (SUBX.cur.idx | 0) : -1;
+    var cs = (ci >= 0) ? BG_WORK[ci] : null;
+    if(cs && Number(cs.dur) > 0 && !(dur > 0)) dur = Number(cs.dur);
+  }
+  return { base: base, dur: dur };
+}
 function mpTimeline(){
   var L = mpLines(), a = BG.audio;
   if(!L.length || !a) return null;
-  var dur = isFinite(a.duration) ? a.duration : 0;
+  var w0 = mpWin(a), dur = w0.dur, base = w0.base;
   if(!(dur > 0)) return null;
-  var key = L.length + "|" + Math.round(dur * 100) + "|" + L.join("").length;
+  var key = L.length + "|" + Math.round(dur * 100) + "|" + Math.round(base * 10) + "|" + L.join("").length;
   if(MP.tl && MP.tlKey === key) return MP.tl;
   var w = [], tot = 0, i, n;
   for(i = 0; i < L.length; i++){
@@ -5298,11 +5333,12 @@ function mpTimeline(){
     if(n < 1) n = 1;
     w.push(n); tot += n;
   }
-  var acc = 0, seg = [], s0;
+  var acc = 0, seg = [], s0, a0;
   for(i = 0; i < L.length; i++){
-    s0 = dur * acc / tot;
+    a0 = acc;
     acc += w[i];
-    seg.push({ s:s0, e:dur * acc / tot });
+    s0 = base + dur * a0 / tot;
+    seg.push({ s:s0, e:base + dur * acc / tot });
   }
   MP.tl = seg; MP.tlKey = key;
   return seg;
@@ -5314,12 +5350,24 @@ function mpIdxAt(tl, t){
 function mpSub(idx, n, t, tl){
   var head = (BG.mode === "sleep" ? "睡前听" : "工作听");
   if(BG.mode === "work"){
-    head += " · 第 " + (bgPoolPosOf(bgNormIdx(BG.idx)) + 1) + "/" + bgPoolLen() + " 段";
+    /* v34：工作听走长音轨后 BG.idx 不再逐段更新（段前进记在 BGL.cur），
+       段号必须读 BGL.cur，否则字幕条永远停在「第 1/27 段」，和听到的段落对不上 */
+    var wi = (BG.long && BGL.ready && BGL.cur >= 0) ? BGL.cur : bgNormIdx(BG.idx);
+    var wp = bgPoolPosOf(wi);
+    if(!(wp >= 0)) wp = bgPoolPosOf(bgNormIdx(BG.idx));
+    head += " · 第 " + ((wp >= 0 ? wp : 0) + 1) + "/" + bgPoolLen() + " 段";
+  } else if(BG.longSleep){
+    /* v34：铺底期间轮次不推进，标「息屏铺底」比一直显示第 1 轮更贴事实 */
+    head += " · 息屏铺底";
   } else {
     head += " · 第 " + ((BG.rounds | 0) + 1) + " 轮";
   }
   if(n) head += " · 句 " + (Math.min(idx, n - 1) + 1) + "/" + n;
-  if(t) head += " · " + mpClock(t);
+  /* v34：长音轨时 t 是整条音轨的绝对秒，显示要扣掉本段起点，否则用户看到 12:30 这种秒数 */
+  if(t){
+    var b0 = (tl && tl.length) ? (tl[0].s || 0) : 0;
+    head += " · " + mpClock(Math.max(0, t - b0));
+  }
   return head;
 }
 function mpBuild(){
@@ -5437,7 +5485,7 @@ function mpSync(){
     if(bar.classList.contains("on")) bar.classList.remove("on");
     if(document.body.classList.contains("mp-live")) document.body.classList.remove("mp-live");
     if(MP.open) mpShut();
-    MP.cur = -1; MP.hi = -1; MP.key = ""; MP.loop = -1;
+    MP.cur = -1; MP.hi = -1; MP.key = ""; MP.loop = -1; MP.cardHi = -1;
     if(MP.slow >= 0){ if(BG.audio){ try{ BG.audio.playbackRate = BG.rate; }catch(e){} } MP.slow = -1; }
     return;
   }
@@ -5462,6 +5510,8 @@ function mpSync(){
     MP.slow = -1;
   }
   MP.cur = idx;
+  /* v34：字幕卡也跟着当前句高亮，页面里那块字幕和耳朵听到的必须是同一句 */
+  if(MP.cardHi !== idx){ MP.cardHi = idx; bgSubHiCard(idx); }
   var cov = document.getElementById("mpCov");
   if(cov){ if(BG.paused) cov.classList.add("off"); else cov.classList.remove("off"); }
   var play = document.getElementById("mpPlay");
@@ -5470,9 +5520,10 @@ function mpSync(){
   var sent = L.length ? L[Math.min(idx, L.length - 1)] : "";
   if(t1) t1.textContent = MP.blind ? "（盲听中 · 点开揭晓）" : (sent || mpLabel());
   if(t2) t2.textContent = (BG.paused ? "已暂停 · " : "") + mpSub(idx, L.length, t, tl);
-  var dur = (a && isFinite(a.duration) && a.duration > 0) ? a.duration : 0;
+  /* v34：长音轨时进度/时间按「本段」算，不再拿整条 24 分钟的音轨去比 */
+  var wv = mpWin(a), dur = (wv.dur > 0) ? wv.dur : 0, td = Math.max(0, t - (wv.base || 0));
   var pg = document.getElementById("mpProg");
-  if(pg) pg.style.width = dur ? Math.min(100, t / dur * 100) + "%" : "0%";
+  if(pg) pg.style.width = dur ? Math.min(100, td / dur * 100) + "%" : "0%";
   if(!MP.open) return;
   /* 字幕页：段变了才重建列表，否则只挪高亮（不打断滚动和点击） */
   if(MP.key !== mpKeyOf()) mpRenderLines();
@@ -5487,9 +5538,9 @@ function mpSync(){
   var sr = document.getElementById("mpsRate");
   if(sr) sr.textContent = (MP.slow >= 0 ? "0.7" : String(BG.rate));
   var spg = document.getElementById("mpsProg");
-  if(spg) spg.style.width = dur ? Math.min(100, t / dur * 100) + "%" : "0%";
+  if(spg) spg.style.width = dur ? Math.min(100, td / dur * 100) + "%" : "0%";
   var stm = document.getElementById("mpsTime");
-  if(stm) stm.textContent = mpClock(t) + " / " + (dur ? mpClock(dur) : "--:--");
+  if(stm) stm.textContent = mpClock(td) + " / " + (dur ? mpClock(dur) : "--:--");
 }
 function mpOpen(){
   if(!BG.playing){ toast("先开始背景听，才有字幕可看"); return; }
