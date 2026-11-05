@@ -12474,7 +12474,14 @@ function bgPlayChunk(){
      音量不归页面管（没有可写的 volume 通道，改 rate 只会变语速），
      所以这里保持原样、靠句间 gap 自然收尾，不假装做淡出。 */
   if(seg && seg.a){
-    bgPlayMp3(seg.a, rate, gap, afterChunk, function(){ bgSaySeq(list, rate, gap, afterChunk); });
+    bgPlayMp3(seg.a, rate, gap, afterChunk, function(){
+      /* v28：息屏时系统语音一定会被挂起，退回朗读等于原地静默卡死——直接换下一段音频顶上 */
+      if(bgHidden()){ afterChunk(); return; }
+      bgSaySeq(list, rate, gap, afterChunk);
+    });
+  } else if(bgHidden()){
+    /* v28：这一段没有音频、页面又不可见——系统语音必然被挂起，直接跳下一段 */
+    afterChunk();
   } else {
     bgSaySeq(list, rate, gap, afterChunk);
   }
@@ -12526,16 +12533,19 @@ function bgSleepPlayCur(start){
   }
   bgMetaSet();                                     /* v23 行为不变：锁屏标题显示「睡前听 · 第 N 轮」 */
   var cur = pk.items[it];
-  /* v28：息屏/后台时系统语音（TTS）一定会被系统挂起，句子项直接跳过，只放预生成的整段音频；
-     一整轮都没有音频段可放时如实暂停，绝不空转刷轮次、也不假装还在念 */
+  /* v28：息屏/后台时系统语音（TTS）一定会被系统挂起。凡是句子项，改成插播一段预生成音频顶上：
+     声音不断、内容持续更换；回到前台后照原计划接着念句子，进度不丢。
+     （只"跳过句子"的做法实测会让睡前听在某一段之后直接停住，等于息屏就没声） */
   if(cur.k !== "mp3" && bgHidden()){
-    pk.skip = (pk.skip | 0) + 1;
-    if(pk.skip >= pk.items.length){
+    var bs = bgSleepAudioSeg(cur);
+    if(!bs){
       bgPause();
-      toast("息屏时只能放预生成的整段音频；这一轮没有音频段，已暂停。亮屏后点继续，接着念今天的句子");
+      toast("息屏时只能放预生成的整段音频，这一轮没有可用音频，已暂停。亮屏后点继续，接着念今天的句子");
       return;
     }
-    bgSleepPlayCur(it + 1);
+    bgPlayMp3(bs.a, BG_SLEEP_C_RATE, 400,
+      function(){ if(BG.playing && !BG.paused) bgSleepPlayCur(it + 1); },
+      function(){ if(BG.playing && !BG.paused) bgSleepPlayCur(it + 1); });
     return;
   }
   pk.skip = 0;
@@ -12544,13 +12554,35 @@ function bgSleepPlayCur(start){
     if(seg && seg.a){
       bgPlayMp3(seg.a, BG_SLEEP_C_RATE, bgSleepGap(),
         function(){ bgSleepPlayCur(it + 1); },
-        function(){ bgSleepSaySeg(cur, it); });    /* mp3 放不出来按句念，仍算 C 的来源，不退回空转 */
+        function(){
+          /* v28：息屏时系统语音必被挂起，放不出来就直接跳到下一条，别用朗读原地卡住 */
+          if(bgHidden()){ bgSleepPlayCur(it + 1); return; }
+          bgSleepSaySeg(cur, it);
+        });    /* mp3 放不出来按句念，仍算 C 的来源，不退回空转 */
       return;
     }
+    if(bgHidden()){ bgSleepPlayCur(it + 1); return; }
     bgSleepSaySeg(cur, it);
     return;
   }
   bgSaySeq([cur.x], bgSleepRate, bgSleepGap, function(){ bgSleepPlayCur(it + 1); });
+}
+/* v28：息屏顶播——从预生成音频里顺序取下一段（跳过没音频的项，尽量不和刚才那条重复） */
+function bgSleepAudioSeg(cur){
+  var n = BG_WORK.length;
+  if(!n) return null;
+  var pick = null;
+  for(var k = 0; k < n; k++){
+    BG.sleepA = ((BG.sleepA | 0) + 1) % n;
+    var s = BG_WORK[BG.sleepA];
+    if(s && s.a){ pick = s; break; }
+  }
+  if(!pick) return null;
+  if(cur && cur.seg && cur.seg.a && cur.seg.a === pick.a){
+    var nx = (BG.sleepA + 1) % n;
+    if(BG_WORK[nx] && BG_WORK[nx].a){ BG.sleepA = nx; pick = BG_WORK[nx]; }
+  }
+  return { a: pick.a, seg: pick };
 }
 /* C 段没有 mp3（或加载失败）时按段内原句念，来源仍是 C，语速同样用慢档 */
 function bgSleepSaySeg(cur, it){
