@@ -118,6 +118,65 @@ main{flex:1;padding:6px 18px 104px;padding-bottom:calc(104px + var(--safe-b))}
 .view.on{display:block;animation:fade .26s cubic-bezier(.2,.7,.3,1)}
 @keyframes fade{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
 
+/* ===== v30：迷你播放条 + 全屏字幕页（借鉴音乐 App 的常驻播放器） ===== */
+#mpbar{
+  position:fixed;left:0;right:0;bottom:calc(64px + var(--safe-b));z-index:41;
+  width:calc(100% - 24px);max-width:696px;margin:0 auto;
+  display:none;align-items:center;gap:9px;padding:9px 9px 9px 9px;border-radius:18px;
+  background:var(--glass2);backdrop-filter:saturate(180%) blur(18px);
+  border:1px solid var(--line2);box-shadow:0 12px 30px -14px rgba(20,26,17,.34);
+}
+#mpbar.on{display:flex;animation:mpUp .24s cubic-bezier(.2,.7,.3,1)}
+@keyframes mpUp{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
+.mpcov{
+  width:42px;height:42px;flex:0 0 42px;border-radius:13px;border:0;padding:0;cursor:pointer;
+  background:linear-gradient(150deg,var(--green),var(--green-d));display:grid;place-items:center;
+}
+.mpcov .wv{display:flex;align-items:center;height:16px}
+.mpcov .wv i{display:block;width:2.6px;margin:0 1.2px;height:8px;border-radius:2px;background:rgba(255,255,255,.94)}
+.mpcov .wv i:nth-child(1){animation:mpw .92s ease-in-out infinite}
+.mpcov .wv i:nth-child(2){animation:mpw .74s ease-in-out .12s infinite}
+.mpcov .wv i:nth-child(3){animation:mpw 1.04s ease-in-out .22s infinite}
+.mpcov .wv i:nth-child(4){animation:mpw .82s ease-in-out .06s infinite}
+.mpcov.off .wv i{animation-play-state:paused;height:7px;opacity:.6}
+@keyframes mpw{0%,100%{height:6px}50%{height:15px}}
+.mpinfo{flex:1;min-width:0;background:none;border:0;padding:0;cursor:pointer;text-align:left;color:inherit;font:inherit}
+.mpt1{font-size:13.5px;font-weight:750;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mpt2{font-size:11.5px;color:var(--muted);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mpprog{margin-top:6px;height:3px;border-radius:9px;background:var(--bar-bg);overflow:hidden}
+.mpprog.big{height:5px}
+.mpprog i{display:block;height:100%;width:0;background:var(--green);border-radius:9px;transition:width .25s linear}
+.mpico{
+  width:34px;height:34px;flex:0 0 34px;border-radius:11px;border:1px solid var(--line2);
+  background:var(--surf3);display:grid;place-items:center;cursor:pointer;color:var(--ink2);padding:0;
+}
+.mpico svg{width:17px;height:17px;stroke:currentColor;fill:none;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
+.mpico.pri{background:var(--green);border-color:var(--green);color:var(--on-pri)}
+.mpico.pri svg{fill:currentColor;stroke:none}
+.mpico.act{background:var(--green-l);border-color:var(--green);color:var(--green-d)}
+
+#mpsheet{position:fixed;inset:0;z-index:60;display:none;flex-direction:column;background:var(--bg)}
+#mpsheet.on{display:flex;animation:mpUp .22s cubic-bezier(.2,.7,.3,1)}
+.mpshd{
+  display:flex;align-items:center;gap:9px;
+  padding:calc(12px + env(safe-area-inset-top,0px)) 12px 10px;border-bottom:1px solid var(--line2);
+  background:var(--card);
+}
+.mpshdt{flex:1;min-width:0}
+.mpsbody{flex:1;overflow-y:auto;padding:12px 12px 26px;position:relative;-webkit-overflow-scrolling:touch}
+.mpln{display:flex;gap:9px;padding:9px 10px;border-radius:12px;cursor:pointer;transition:background .16s}
+.mpln:active{background:var(--surf2)}
+.mpli{font-size:10.5px;color:var(--muted);min-width:17px;padding-top:4px;font-variant-numeric:tabular-nums;text-align:right}
+.mpltx{font-size:14.5px;line-height:1.64;color:var(--ink2);transition:color .16s}
+.mpln.on{background:var(--green-l)}
+.mpln.on .mpltx{color:var(--green-tx);font-weight:750;font-size:16px}
+.mpln.on .mpli{color:var(--green-d);font-weight:800}
+#mpsheet.blind .mpltx{filter:blur(6px);user-select:none;-webkit-user-select:none}
+#mpsheet.blind .mpln.peek .mpltx{filter:none}
+.mpsfoot{padding:10px 14px calc(12px + var(--safe-b));border-top:1px solid var(--line2);background:var(--card)}
+.mpsctl{display:flex;gap:8px;justify-content:center;margin-top:9px;flex-wrap:wrap}
+.mpempty{padding:34px 12px;text-align:center;color:var(--muted);font-size:12.5px;line-height:1.75}
+
 /* ===== 底部标签：悬浮胶囊 ===== */
 .tabbar{
   position:fixed;left:0;right:0;bottom:0;z-index:40;display:flex;gap:2px;
@@ -367,6 +426,8 @@ label.fl{display:block;font-size:11.5px;font-weight:800;color:var(--muted);margi
   opacity:0;pointer-events:none;transition:all .24s;max-width:82vw;text-align:center;letter-spacing:.2px;
 }
 .toast.on{opacity:1;transform:translate(-50%,0)}
+/* 迷你播放条在底部时提示要往上让，否则"盲听/循环第几句"这类提示正好盖住条子本身 */
+body.mp-live .toast{bottom:calc(140px + var(--safe-b))}
 .hr{height:1px;background:var(--line2);margin:14px 0}
 .linkrow{display:flex;align-items:center;gap:10px;padding:12px 0;border-bottom:1px solid var(--line2);text-decoration:none;color:inherit}
 .linkrow:last-child{border-bottom:0}
@@ -621,6 +682,9 @@ html[data-theme="dark"] body.bgnight{--bg:#080C09;--card:#101610;--surf:#101610;
 </div>
 <div class="mask" id="mask" onclick="if(event.target===this)closeSheet()"><div class="sheet" id="sheet"></div></div>
 <div class="toast" id="toast"></div>
+<!-- v30：常驻迷你播放条 + 全屏字幕页（内容由 mpBuild/mpBuildSheet 生成） -->
+<div id="mpbar"></div>
+<div id="mpsheet"></div>
 
 <script>
 /* ==== el2_vocab_a.js ==== */
@@ -5177,6 +5241,360 @@ function bgSubRender(){
   if(el) el.innerHTML = bgSubInner();
   var el2 = document.getElementById("bgSubCardIdle");
   if(el2) el2.innerHTML = bgSubHistHtml();
+}
+
+/* ===== v30：迷你播放条 + 全屏字幕页 =====
+   借鉴音乐 App 的常驻播放器：任何页面底部都有一条迷你条，点开是全屏字幕。
+   字幕不是装饰，是听力的抓手——逐句跟着音频高亮、点句子跳听、单句循环、
+   0.7 倍慢速重听、盲听自测（先不看字，听不懂再点开那一句）。
+   实现上完全不碰既有播放链：只读 BG/SUBX 状态、250ms 轮询同步，
+   音频仍是 bgAudioEl() 那一个元素，息屏续播、互斥、记账逻辑一律不动。 */
+var MP = { built:0, sbuilt:0, open:0, blind:0, loop:-1, slow:-1, cur:-1, hi:-1, key:"", tl:null, tlKey:"" };
+
+function mpIco(n){
+  var d = {
+    play:'<path d="M8 5.6v12.8L18.6 12z"/>',
+    pause:'<rect x="8.2" y="6" width="3.1" height="12" rx="1.1"/><rect x="13.4" y="6" width="3.1" height="12" rx="1.1"/>',
+    text:'<path d="M4.5 7h15M4.5 12h11M4.5 17h7"/>',
+    x:'<path d="M7 7l10 10M17 7 7 17"/>',
+    down:'<path d="M6 9.5 12 15.5 18 9.5"/>',
+    eye:'<path d="M2.6 12S6 5.9 12 5.9 21.4 12 21.4 12 18 18.1 12 18.1 2.6 12 2.6 12Z"/><circle cx="12" cy="12" r="2.7"/>'
+  }[n] || '';
+  return '<svg viewBox="0 0 24 24">' + d + '</svg>';
+}
+function mpClock(x){
+  x = Math.max(0, Math.floor(x || 0));
+  return ("0" + Math.floor(x / 60)).slice(-2) + ":" + ("0" + (x % 60)).slice(-2);
+}
+function mpLines(){
+  var c = SUBX.cur;
+  return (c && c.lines) ? c.lines : [];
+}
+function mpLabel(){
+  var c = SUBX.cur;
+  var t = (c && c.title) ? c.title : "背景听";
+  return (BG.mode === "sleep" ? "睡前听 · " : "工作听 · ") + t;
+}
+function mpKeyOf(){
+  var c = SUBX.cur;
+  if(!c) return "none";
+  var L = c.lines || [];
+  return (c.mode || "") + "|" + (c.idx == null ? "" : c.idx) + "|" + (c.title || "") + "|" +
+         L.length + "|" + (L[0] || "") + "|" + (L[L.length - 1] || "");
+}
+/* 句级时间轴：预生成 mp3 没有逐句时间戳，只能按词数比例切分整段时长。
+   比例估算不是精确对齐，但足够让高亮跟住人耳听到的位置，也不影响任何记账。 */
+function mpTimeline(){
+  var L = mpLines(), a = BG.audio;
+  if(!L.length || !a) return null;
+  var dur = isFinite(a.duration) ? a.duration : 0;
+  if(!(dur > 0)) return null;
+  var key = L.length + "|" + Math.round(dur * 100) + "|" + L.join("").length;
+  if(MP.tl && MP.tlKey === key) return MP.tl;
+  var w = [], tot = 0, i, n;
+  for(i = 0; i < L.length; i++){
+    n = String(L[i]).split(/\s+/).filter(Boolean).length;
+    if(n < 1) n = 1;
+    w.push(n); tot += n;
+  }
+  var acc = 0, seg = [], s0;
+  for(i = 0; i < L.length; i++){
+    s0 = dur * acc / tot;
+    acc += w[i];
+    seg.push({ s:s0, e:dur * acc / tot });
+  }
+  MP.tl = seg; MP.tlKey = key;
+  return seg;
+}
+function mpIdxAt(tl, t){
+  for(var i = 0; i < tl.length; i++){ if(t < tl[i].e) return i; }
+  return tl.length - 1;
+}
+function mpSub(idx, n, t, tl){
+  var head = (BG.mode === "sleep" ? "睡前听" : "工作听");
+  if(BG.mode === "work"){
+    head += " · 第 " + (bgPoolPosOf(bgNormIdx(BG.idx)) + 1) + "/" + bgPoolLen() + " 段";
+  } else {
+    head += " · 第 " + ((BG.rounds | 0) + 1) + " 轮";
+  }
+  if(n) head += " · 句 " + (Math.min(idx, n - 1) + 1) + "/" + n;
+  if(t) head += " · " + mpClock(t);
+  return head;
+}
+function mpBuild(){
+  if(MP.built) return;
+  var bar = document.getElementById("mpbar");
+  if(!bar) return;
+  MP.built = 1;
+  bar.innerHTML =
+    '<button class="mpcov" id="mpCov" onclick="mpOpen()" aria-label="打开字幕">' +
+      '<span class="wv"><i></i><i></i><i></i><i></i></span></button>' +
+    '<button class="mpinfo" onclick="mpOpen()">' +
+      '<div class="mpt1" id="mpT1">背景听</div>' +
+      '<div class="mpt2" id="mpT2"></div>' +
+      '<div class="mpprog"><i id="mpProg"></i></div>' +
+    '</button>' +
+    '<button class="mpico pri" id="mpPlay" onclick="mpToggle(event)" aria-label="播放或暂停">' + mpIco("pause") + '</button>' +
+    '<button class="mpico" onclick="mpOpen()" aria-label="字幕">' + mpIco("text") + '</button>' +
+    '<button class="mpico" onclick="mpStopAll(event)" aria-label="停止">' + mpIco("x") + '</button>';
+}
+function mpBuildSheet(){
+  if(MP.sbuilt) return;
+  var sh = document.getElementById("mpsheet");
+  if(!sh) return;
+  MP.sbuilt = 1;
+  sh.innerHTML =
+    '<div class="mpshd">' +
+      '<button class="mpico" onclick="mpShut()" aria-label="收起">' + mpIco("down") + '</button>' +
+      '<div class="mpshdt"><div class="mpt1" id="mpsT1">字幕</div><div class="mpt2" id="mpsT2"></div></div>' +
+      '<button class="mpico" id="mpsBlind" onclick="mpBlindToggle()" aria-label="盲听">' + mpIco("eye") + '</button>' +
+    '</div>' +
+    '<div class="mpsbody" id="mpsBody"></div>' +
+    '<div class="mpsfoot">' +
+      '<div class="mpprog big"><i id="mpsProg"></i></div>' +
+      '<div class="row" style="justify-content:space-between;margin-top:5px">' +
+        '<div class="tiny muted" id="mpsTime">00:00 / --:--</div>' +
+        '<div class="tiny muted" id="mpsHint">点句子可跳听</div>' +
+      '</div>' +
+      '<div class="mpsctl">' +
+        '<button class="btn sm ghost" onclick="mpStep(-1)">上一句</button>' +
+        '<button class="btn sm" id="mpsPlay" onclick="mpToggle(event)">暂停</button>' +
+        '<button class="btn sm ghost" onclick="mpStep(1)">下一句</button>' +
+      '</div>' +
+      '<div class="mpsctl">' +
+        '<button class="btn sm ghost" id="mpsLoop" onclick="mpLoopToggle()">循环本句</button>' +
+        '<button class="btn sm ghost" onclick="mpSlow()">慢速重听</button>' +
+        '<button class="btn sm ghost" onclick="mpRateStep()">语速 <span id="mpsRate">0.9</span>x</button>' +
+      '</div>' +
+    '</div>';
+}
+function mpRenderLines(){
+  var body = document.getElementById("mpsBody");
+  if(!body) return;
+  var L = mpLines(), h = '', i;
+  if(!L.length){
+    h = '<div class="mpempty">这一路暂时没有字幕。<br>背景听开始后会显示正在念的原文。</div>';
+  } else {
+    for(i = 0; i < L.length; i++){
+      h += '<div class="mpln" data-i="' + i + '" onclick="mpSeekLine(' + i + ')">' +
+           '<span class="mpli">' + (i + 1) + '</span>' +
+           '<span class="mpltx">' + esc(L[i]) + '</span></div>';
+    }
+  }
+  body.innerHTML = h;
+  MP.key = mpKeyOf();
+  MP.hi = -1;
+}
+function mpHi(idx, scroll){
+  var body = document.getElementById("mpsBody");
+  if(!body) return;
+  var nodes = body.querySelectorAll(".mpln"), i;
+  for(i = 0; i < nodes.length; i++){
+    if(i === idx) nodes[i].classList.add("on");
+    else nodes[i].classList.remove("on");
+  }
+  if(scroll && nodes[idx]){
+    var top = nodes[idx].offsetTop - body.clientHeight / 2 + nodes[idx].offsetHeight / 2;
+    try{ body.scrollTo({ top:Math.max(0, top), behavior:"smooth" }); }
+    catch(e){ body.scrollTop = Math.max(0, top); }
+  }
+}
+/* 按句跳位：新加载的段有几秒钟 seekable 还是空的（服务器没给 Range 时更明显），
+   这时写 currentTime 会被浏览器直接夹回 0。做法是写一次校验一次，没到位就接着重试；
+   真的一直不到位就明确告诉用户"还在缓冲"，绝不假装跳过去了。 */
+function mpSeekTo(sec, tries, gen){
+  var a = BG.audio;
+  if(!a) return;
+  if(gen === undefined){
+    /* 连点几句时，旧的那串重试必须作废，否则几个循环互相盖 currentTime */
+    MP.seekGen = (MP.seekGen || 0) + 1;
+    gen = MP.seekGen;
+    tries = 0;
+  }
+  if(gen !== MP.seekGen) return;
+  var ok = false;
+  try{
+    if(a.readyState >= 1){
+      a.currentTime = sec;
+      ok = Math.abs(a.currentTime - sec) < 0.8;
+    }
+  }catch(e){}
+  if(ok || tries >= 20) {
+    if(!ok && !MP.seekWarn){
+      MP.seekWarn = 1;
+      toast("这段音频还在缓冲，按句跳要等两秒；先听，别急着点");
+      setTimeout(function(){ MP.seekWarn = 0; }, 4000);
+    }
+    return;
+  }
+  setTimeout(function(){ mpSeekTo(sec, tries + 1, gen); }, 150);
+}
+function mpSync(){
+  var bar = document.getElementById("mpbar");
+  if(!bar) return;
+  if(!BG.playing){
+    if(bar.classList.contains("on")) bar.classList.remove("on");
+    if(document.body.classList.contains("mp-live")) document.body.classList.remove("mp-live");
+    if(MP.open) mpShut();
+    MP.cur = -1; MP.hi = -1; MP.key = ""; MP.loop = -1;
+    if(MP.slow >= 0){ if(BG.audio){ try{ BG.audio.playbackRate = BG.rate; }catch(e){} } MP.slow = -1; }
+    return;
+  }
+  mpBuild();
+  if(!bar.classList.contains("on")) bar.classList.add("on");
+  if(!document.body.classList.contains("mp-live")) document.body.classList.add("mp-live");
+  if(bgHidden()) return;                       /* 息屏不做 DOM 工作，省电也省得惊动播放链 */
+  var L = mpLines(), tl = mpTimeline(), a = BG.audio;
+  var t = (a && isFinite(a.currentTime)) ? a.currentTime : 0;
+  /* 单句循环：到头就回这一句的开头，不把整段带跑 */
+  if(tl && MP.loop >= 0 && a){
+    var lp = tl[Math.min(MP.loop, tl.length - 1)];
+    if(lp && t >= lp.e - 0.05){
+      try{ a.currentTime = lp.s + 0.01; }catch(e){}
+      t = lp.s;
+    }
+  }
+  var idx = tl ? mpIdxAt(tl, t) : 0;
+  /* 慢速重听只针对那一句，句子一换立刻回原速 */
+  if(MP.slow >= 0 && a && (MP.slow !== idx || !tl)){
+    try{ a.playbackRate = BG.rate; }catch(e){}
+    MP.slow = -1;
+  }
+  MP.cur = idx;
+  var cov = document.getElementById("mpCov");
+  if(cov){ if(BG.paused) cov.classList.add("off"); else cov.classList.remove("off"); }
+  var play = document.getElementById("mpPlay");
+  if(play) play.innerHTML = mpIco(BG.paused ? "play" : "pause");
+  var t1 = document.getElementById("mpT1"), t2 = document.getElementById("mpT2");
+  var sent = L.length ? L[Math.min(idx, L.length - 1)] : "";
+  if(t1) t1.textContent = MP.blind ? "（盲听中 · 点开揭晓）" : (sent || mpLabel());
+  if(t2) t2.textContent = (BG.paused ? "已暂停 · " : "") + mpSub(idx, L.length, t, tl);
+  var dur = (a && isFinite(a.duration) && a.duration > 0) ? a.duration : 0;
+  var pg = document.getElementById("mpProg");
+  if(pg) pg.style.width = dur ? Math.min(100, t / dur * 100) + "%" : "0%";
+  if(!MP.open) return;
+  /* 字幕页：段变了才重建列表，否则只挪高亮（不打断滚动和点击） */
+  if(MP.key !== mpKeyOf()) mpRenderLines();
+  if(MP.hi !== idx){ MP.hi = idx; mpHi(idx, true); }
+  var st1 = document.getElementById("mpsT1"), st2 = document.getElementById("mpsT2");
+  if(st1) st1.textContent = mpLabel();
+  if(st2) st2.textContent = (BG.paused ? "已暂停 · " : "") + mpSub(idx, L.length, t, tl);
+  var sp = document.getElementById("mpsPlay");
+  if(sp) sp.textContent = BG.paused ? "继续" : "暂停";
+  var sl = document.getElementById("mpsLoop");
+  if(sl){ if(MP.loop >= 0) sl.classList.add("on"); else sl.classList.remove("on"); }
+  var sr = document.getElementById("mpsRate");
+  if(sr) sr.textContent = (MP.slow >= 0 ? "0.7" : String(BG.rate));
+  var spg = document.getElementById("mpsProg");
+  if(spg) spg.style.width = dur ? Math.min(100, t / dur * 100) + "%" : "0%";
+  var stm = document.getElementById("mpsTime");
+  if(stm) stm.textContent = mpClock(t) + " / " + (dur ? mpClock(dur) : "--:--");
+}
+function mpOpen(){
+  if(!BG.playing){ toast("先开始背景听，才有字幕可看"); return; }
+  MP.open = 1; MP.hi = -1; MP.loop = -1;
+  mpBuildSheet();
+  mpRenderLines();
+  var sh = document.getElementById("mpsheet");
+  if(sh){ sh.classList.add("on"); sh.classList.toggle("blind", !!MP.blind); }
+  mpSync();
+}
+function mpShut(){
+  MP.open = 0; MP.loop = -1; MP.hi = -1;
+  var sh = document.getElementById("mpsheet");
+  if(sh) sh.classList.remove("on");
+}
+function mpToggle(e){
+  if(e && e.stopPropagation) e.stopPropagation();
+  if(BG.paused) bgResume(); else bgPause();
+  setTimeout(function(){ try{ mpSync(); }catch(err){} }, 120);
+}
+function mpStopAll(e){
+  if(e && e.stopPropagation) e.stopPropagation();
+  mpShut();
+  bgStop(false);
+}
+function mpSeekLine(i){
+  var L = mpLines(), tl = mpTimeline(), a = BG.audio;
+  if(!L.length) return;
+  if(!tl || !a){ toast("这一路是系统语音在读，没法按句跳；等它念完这一段"); return; }
+  if(i < 0 || i >= tl.length) return;
+  if(BG.paused) bgResume();
+  mpSeekTo(tl[i].s + 0.01);
+  /* 盲听时点句子＝揭晓这一句：先听，听不懂再精确看那一句 */
+  var body = document.getElementById("mpsBody");
+  if(body){
+    var nodes = body.querySelectorAll(".mpln"), k;
+    for(k = 0; k < nodes.length; k++){
+      if(k === i) nodes[k].classList.add("peek"); else nodes[k].classList.remove("peek");
+    }
+  }
+  MP.hi = -1;
+  setTimeout(function(){ try{ mpSync(); }catch(err){} }, 60);
+}
+function mpStep(d){
+  var L = mpLines();
+  if(!L.length) return;
+  if(!mpTimeline()){ toast("这一路是系统语音在读，没法逐句跳"); return; }
+  var i = (MP.cur < 0 ? 0 : MP.cur) + d;
+  if(i < 0){ toast("已经是第一句"); return; }
+  if(i >= L.length){ toast("已经是最后一句，想往下就跳下一段"); return; }
+  mpSeekLine(i);
+}
+function mpLoopToggle(){
+  if(MP.loop >= 0){ MP.loop = -1; toast("已取消单句循环"); }
+  else {
+    MP.loop = (MP.cur >= 0 ? MP.cur : 0);
+    toast("循环第 " + (MP.loop + 1) + " 句，听懂了再点一次取消");
+  }
+  try{ mpSync(); }catch(e){}
+}
+function mpSlow(){
+  var tl = mpTimeline(), a = BG.audio;
+  if(!tl || !a){ toast("这一路是系统语音在读，慢放要在设置里改语速"); return; }
+  var i = (MP.cur >= 0 ? MP.cur : 0);
+  MP.loop = -1;
+  try{ a.playbackRate = 0.7; }catch(e){}
+  mpSeekTo(tl[i].s + 0.01);
+  MP.slow = i;
+  toast("第 " + (i + 1) + " 句以 0.7 倍慢放，放完自动回 " + BG.rate + " 倍");
+  try{ mpSync(); }catch(e){}
+}
+function mpRateStep(){
+  var steps = [0.7, 0.8, 0.9, 1.0, 1.1, 1.2], i, nx = null;
+  for(i = 0; i < steps.length; i++){
+    if(Math.abs(steps[i] - BG.rate) < 0.001){ nx = steps[(i + 1) % steps.length]; break; }
+  }
+  /* 现有语速不在档位里（比如 0.95 是历史默认值）时，别一把把它拽到 0.7：
+     把当前值当一档插进列表，顺着往上走一格，用户感受是"微调"，不是"跳变" */
+  if(nx === null){
+    var all = steps.slice(0);
+    all.push(BG.rate);
+    all.sort(function(x, y){ return x - y; });
+    for(i = 0; i < all.length; i++){ if(Math.abs(all[i] - BG.rate) < 0.001) break; }
+    nx = all[(i + 1) % all.length];
+    if(Math.abs(nx - BG.rate) < 0.001) nx = steps[0];
+  }
+  BG.rate = nx;
+  if(BG.mode === "work") BG.rateWork = nx; else BG.rateSleep = nx;
+  MP.slow = -1;
+  if(BG.audio){ try{ BG.audio.playbackRate = nx; }catch(e){} }
+  toast("这一段语速改成 " + nx + " 倍，下一段沿用");
+  try{ mpSync(); }catch(e){}
+}
+function mpBlindToggle(){
+  MP.blind = MP.blind ? 0 : 1;
+  var sh = document.getElementById("mpsheet");
+  if(sh) sh.classList.toggle("blind", !!MP.blind);
+  var b = document.getElementById("mpsBlind");
+  if(b) b.classList.toggle("act", !!MP.blind);
+  toast(MP.blind ? "盲听：先不看字，听不懂再点那一句揭晓" : "字幕已显示");
+  try{ mpSync(); }catch(e){}
+}
+function mpInit(){
+  mpBuild();
+  setInterval(function(){ try{ mpSync(); }catch(e){} }, 250);
+  document.addEventListener("visibilitychange", function(){ try{ mpSync(); }catch(e){} });
 }
 
 function stopSpeak(){
@@ -15158,6 +15576,7 @@ function themeHint(){
     var t=e.target;
     if(t && t.classList && t.classList.contains("mask")) closeSheet();
   });
+  try{ mpInit(); }catch(e){}          /* v30：常驻迷你播放条跟着应用一起起来 */
   try{ go("home"); }catch(e){}
 })();
 
