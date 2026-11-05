@@ -11783,6 +11783,9 @@ if(typeof window!=="undefined"){
 
 var BG = { mode:"work", mins:30, rate:0.95, rateWork:0.95, rateSleep:0.8,
            long:0,
+           /* v33：睡前听息屏「长音轨铺底」——longSleep=正在用长音轨顶替句子复习，
+              sleepHold=息屏前冻结的句包进度 {it,g}，亮屏按它接回原来那一句 */
+           longSleep:0, sleepHold:null,
            playing:false, paused:false, idx:0, remain:0,
            timer:null, gapTimer:null, elapsed:0, spoken:0, rounds:0,
            night:false, startedAt:0, pausedMs:0, pauseAt:0,
@@ -12294,6 +12297,15 @@ function bgNormIdx(idx){
   var pos = bgPoolPosOf(idx);
   if(pos >= 0) return p[pos];
   return p[(((idx | 0) % n) + n) % n];
+}
+/* v33：睡前息屏铺底用——不做口音集合归一，只把越界值夹回全库范围。
+   （睡前听的背景段本来就取自全库最慢段，若再过一遍工作听的口音集合，会串到别的段上去） */
+function bgNormAny(idx){
+  var n = BG_WORK.length;
+  if(!n) return 0;
+  idx = idx | 0;
+  if(!(idx >= 0 && idx < n)) idx = ((idx % n) + n) % n;
+  return idx;
 }
 function bgStat(){
   var t = { dur:0, byCat:{}, byAcc:{} }, i, s, k;
@@ -13035,6 +13047,8 @@ function bgStart(fromHead){
   }
   BG.sq = null;                                   /* v26：每次起播重新组池 */
   BG.long = 0;                                    /* v32：起播先清掉上轮连播身份，由 bglStart 重新认定 */
+  BG.longSleep = 0; BG.sleepHold = null; BG.sleepPend = 0;   /* v33：起播清掉铺底状态 */
+  bgSleepVisBind();                               /* v33：起播挂上息屏/亮屏切换（只挂一次） */
   audClaimBg();                                    /* v29：背景听独占出声，精听/单词那一路立刻停 */
   BG.seqToken++;
   var m = (BG.mode === "sleep") ? "sleep" : "work";
@@ -13091,16 +13105,27 @@ function bgResume(){
   audClaimBg();                                   /* v29：继续播也是抢占，精听那一路要停 */
   render();
   bgWakeOn();
+  /* v33：在铺底里点继续（此时人在屏幕前）就直接回句子复习，别在亮屏还接着铺底 */
+  if(BG.mode === "sleep" && BG.longSleep && !bgHidden()){
+    bgSleepExitLong();
+    if(!BG.longSleep){ bgMetaSet(); return; }
+  }
   /* v32：连播模式从暂停的位置接着放（音乐播放器的行为），不回到段首、不重载音轨 */
   if(BG.long){ bglResume(); return; }
+  /* v33：暂停时息了屏：继续时直接进铺底，别在亮屏回到前台后又跟着系统休眠断掉 */
+  if(BG.mode === "sleep" && (BG.sleepPend || bgHidden())){
+    bgSleepEnterLong();
+    if(BG.longSleep) return;
+  }
   bgMetaSet();                                    /* 恢复播放，锁屏状态与段标题重新对上 */
   bgPlayChunk();                                  /* 从本段开头接着放 */
 }
 
 function bgPlayChunk(){
   if(!BG.playing || BG.paused) return;
-  /* v26：睡前听不再走"一次念一串"的老路径，改由 bgSleepPlayCur 逐条推进（A/D/B 单句 + C 整段 mp3） */
-  if(BG.mode === "sleep"){ bgSleepPlayCur(0); return; }
+  /* v26：睡前听不再走"一次念一串"的老路径，改由 bgSleepPlayCur 逐条推进（A/D/B 单句 + C 整段 mp3）
+     v33：暂停后继续要接着当前那条念，不能跳回本轮第一条（否则等于偷偷重播整轮） */
+  if(BG.mode === "sleep"){ bgSleepPlayCur(BG.sq ? (BG.sq.p | 0) : 0); return; }
   /* v32：工作听改走「一条长音轨」（网易云模式）——一次 play 之后不换源、不 pause。
      息屏后浏览器媒体管线自己往下解码，不再出现"一段放完要亮屏才有声"。
      长音轨拿不到（索引缺失/加载失败）时自动退回下面原来的分段播放，绝不哑掉 */
@@ -13159,11 +13184,12 @@ function bgPlayChunkLegacy(){
 var BGL = { url:"audio/bg/bg_all.mp3", data:null, ready:0, loading:0, cb:null, bad:0,
             el:null, bind:0, workOf:[], cur:-1, pendSeek:null, seekAt:0, saveAt:0, hidAt:0, prevCt:null };
 
-/* 是否走长音轨：只在工作听、且素材没被判死时启用 */
+/* 是否走长音轨：工作听一直走；睡前听只在息屏铺底期间走 */
 function bgLongOn(){
-  if(BG.mode !== "work") return false;
   if(BGL.bad) return false;
-  return true;
+  if(BG.mode === "work") return true;
+  if(BG.mode === "sleep" && BG.longSleep) return true;
+  return false;
 }
 function bglEl(){
   if(!BGL.el){
@@ -13248,32 +13274,55 @@ function bglBind(){
   document.addEventListener("visibilitychange", function(){
     if(document.visibilityState === "hidden"){ BGL.hidAt = Date.now(); return; }
     var gap = BGL.hidAt ? (Date.now() - BGL.hidAt) / 1000 : 0;
-    BGL.hidAt = 0;
-    if(!BG.long || !BG.playing || BG.paused) return;
+    if(!BG.long || !BG.playing || BG.paused){ BGL.hidAt = 0; return; }
+    bgAddHiddenGap();
     if(gap >= 2){
-      BGL.prevCt = null;
-      var room = Math.max(0, BG.mins * 60 - bgElapsed());
-      BG.spoken += Math.min(gap, Math.max(0, room));
       bglSyncFromElement();                       /* 回来时把段号/字幕对到真正在放的位置上 */
       bgPaintClock();
     }
   });
 }
+/* v33：把息屏这段时间的真实发声补进 BG.spoken（墙钟口径，暂停/被抢占不计） */
+function bgAddHiddenGap(){
+  var gap = BGL.hidAt ? (Date.now() - BGL.hidAt) / 1000 : 0;
+  BGL.hidAt = 0;
+  if(!(gap >= 2)) return;
+  if(!BG.playing || BG.paused) return;
+  BGL.prevCt = null;
+  var room = Math.max(0, BG.mins * 60 - bgElapsed());
+  BG.spoken += Math.min(gap, Math.max(0, room));
+  bgPaintClock();
+}
+/* 长音轨起不来/坏掉时的统一退路：工作听回分段接力，睡前听回 v28 的段级顶播（绝不静音） */
+function bglFallback(){
+  BG.long = 0;
+  if(BG.mode === "sleep"){
+    BG.longSleep = 0;
+    var it = BG.sleepHold ? (BG.sleepHold.it | 0) : 0;
+    BG.sleepHold = null;
+    if(BG.playing && !BG.paused) bgSleepPlayCur(it);
+    return;
+  }
+  if(BG.playing && !BG.paused) bgPlayChunkLegacy();
+}
 /* 起播：整条音轨只在这里设置一次 src，之后全程 seek */
 function bglStart(workIdx){
-  if(!BG.playing || BG.paused || BG.mode !== "work") return;
+  if(!BG.playing || BG.paused) return;
+  var slp = (BG.mode === "sleep");
+  if(slp){ if(!BG.longSleep) return; }              /* v33：睡前听只在息屏铺底时才准走长音轨 */
+  else if(BG.mode !== "work") return;
   if(!BGL.ready){
-    if(BGL.bad){ bgPlayChunkLegacy(); return; }
+    if(BGL.bad){ bglFallback(); return; }
     bglLoad(function(ok){
       if(!BG.playing || BG.paused) return;
-      if(ok) bglStart(BG.idx);
-      else bgPlayChunkLegacy();                   /* 索引失败：老路子顶上 */
+      if(ok) bglStart(workIdx);
+      else { BGL.bad = 1; bglFallback(); }          /* 索引失败：老路子顶上 */
     });
     return;
   }
-  var w = bgNormIdx(workIdx);
+  var w = slp ? bgNormAny(workIdx) : bgNormIdx(workIdx);
   var pos = bglPosOf(w);
-  if(pos < 0){ bgPlayChunkLegacy(); return; }
+  if(pos < 0){ bglFallback(); return; }
   var el = bglEl();
   BG.long = 1;
   BG.fadeReset = null;                            /* 老路子的淡出计时器不参与连播 */
@@ -13283,9 +13332,10 @@ function bglStart(workIdx){
   BG.speaking = 0;
   if(BG.gapTimer){ clearTimeout(BG.gapTimer); BG.gapTimer = null; }
   bglBind();
-  try{
-    el.playbackRate = Math.max(0.5, Math.min(2, Number(BG.rate) || 1));
-  }catch(e){}
+  /* 睡前铺底用慢放档（bgSleepRate），工作听用页面上的语速。
+     注意：playbackRate 必须在设置 src/load 之后再设——浏览器加载新源会把 playbackRate 复位成 defaultPlaybackRate */
+  var _bglRate = Math.max(0.5, Math.min(2, Number(slp ? bgSleepRate() : BG.rate) || 1));
+  try{ el.defaultPlaybackRate = _bglRate; }catch(e){}
   /* 变速保音高：英语听力变速后不能变调，否则听感失真 */
   try{ el.preservesPitch = true; }catch(e){}
   try{ el.mozPreservesPitch = true; }catch(e){}
@@ -13299,9 +13349,10 @@ function bglStart(workIdx){
   BGL.prevCt = null;
   bglEnterSeg(w);
   if(BGL.pendSeek == null) bglSeekAt(bglSegStart(w) + 0.01);
+  try{ el.playbackRate = _bglRate; }catch(e){}      /* src 之后再落一次，防止被 load 复位 */
   var pr = null;
   try{ pr = el.play(); }
-  catch(e){ BGL.bad = 1; BG.long = 0; bgPlayChunkLegacy(); return; }
+  catch(e){ BGL.bad = 1; bglFallback(); return; }
   if(pr && pr.catch){
     pr.catch(function(){
       /* 被暂停/被抢占导致的 play 中断是正常的，不处理；长时间起不来再退回老路子 */
@@ -13309,8 +13360,8 @@ function bglStart(workIdx){
       setTimeout(function(){
         if(!BG.playing || BG.paused || !BG.long) return;
         if(bglEl().paused && !bglEl().ended){
-          BGL.bad = 1; BG.long = 0;
-          bgPlayChunkLegacy();
+          BGL.bad = 1;
+          bglFallback();
         }
       }, 2500);
     });
@@ -13342,11 +13393,19 @@ function bglSyncFromElement(){
 }
 /* 进段：字幕、目标词曝光、断点、锁屏标题。只更新必要节点，不整页 render（否则每段都重建 DOM） */
 function bglEnterSeg(w){
-  w = bgNormIdx(w);
+  w = (BG.mode === "sleep") ? bgNormAny(w) : bgNormIdx(w);
   if(w === BGL.cur) return;
   BGL.cur = w;
-  BG.idx = w;
   var seg = BG_WORK[w];
+  /* v33：睡前息屏铺底 —— 只换字幕，不动睡前句包指针、不记工作听的词曝光、不写睡前断点轮次 */
+  if(BG.mode === "sleep"){
+    try{
+      bgMetaSet();
+      if(seg) bgSubSet("sleep", seg.t, seg.s, "息屏铺底 · 慢放", w);
+    }catch(e){}
+    return;
+  }
+  BG.idx = w;
   if(seg) BG.exposed += bgExpose(seg);
   try{
     bgMetaSet();
@@ -13366,9 +13425,13 @@ function bglOnTime(){
   if(dt > 0 && dt < 1.5){
     BG.spoken += dt / Math.max(0.5, Number(el.playbackRate) || 1);
   }
+  /* v33：息屏铺底时系统会把 setInterval 压慢甚至冻结，到点收尾靠 timeupdate 兜底，
+     不能让铺底一路放到天亮 */
+  if(BG.mode === "sleep" && bgSleepAutoOn() && bgLeft() <= 0){ bgSleepFinish("timeup"); return; }
   var pos = bglFindPos(t);
   var w = BGL.workOf[pos];
-  if(w >= 0 && w !== BGL.cur){
+  /* v33：睡前铺底不做口音集合筛选——睡前背景段取自全库，按集合跳段会串到别的段上去 */
+  if(w >= 0 && w !== BGL.cur && BG.mode !== "sleep"){
     bglEnterSeg(w);
     /* 口音集合筛选：下一段不在当前集合里，就直接 seek 过去（仍是连播，不暂停） */
     var pool = bgWorkPool();
@@ -13381,14 +13444,21 @@ function bglOnTime(){
         if(p2 >= 0) bglSeekAt(Number(s[p2].start) + 0.01);
       }
     }
+  } else if(w >= 0 && w !== BGL.cur){
+    bglEnterSeg(w);
   }
-  /* 整条放完 → 回到当前集合第一段，继续放（60 分钟档会循环两轮多） */
+  /* 整条放完 → 回到集合第一段，继续放（60 分钟档会循环两轮多） */
   var last = s[s.length - 1];
   if(t >= Number(last.start) + Number(last.dur) - 0.08){
     if(Date.now() - BGL.seekAt > 1500){
-      BG.rounds++;
-      var p3 = bglPosOf(bgWorkPool()[0]);
-      if(p3 >= 0) bglSeekAt(Number(s[p3].start) + 0.01);
+      if(BG.mode === "sleep"){
+        /* 睡前：整条放完就回到开头接着铺，轮次不动（轮次是句子复习的进度，不能被铺底改掉） */
+        bglSeekAt(Number(s[0].start) + 0.01);
+      } else {
+        BG.rounds++;
+        var p3 = bglPosOf(bgWorkPool()[0]);
+        if(p3 >= 0) bglSeekAt(Number(s[p3].start) + 0.01);
+      }
     }
   }
   /* 时间条与断点：3 秒一次，够用且不浪费 */
@@ -13401,15 +13471,15 @@ function bglOnTime(){
 function bglOnEnd(){
   /* ended 理论上不会出现（尾部我们自己 seek 回起点），真出现就原地重播，绝不停 */
   if(!BG.long || !BG.playing || BG.paused) return;
-  var p = bglPosOf(bgWorkPool()[0]);
+  var p = (BG.mode === "sleep") ? 0 : bglPosOf(bgWorkPool()[0]);
   if(p >= 0) bglSeekAt(Number(BGL.data.segments[p].start) + 0.01);
   try{ bglEl().play(); }catch(e){}
 }
 function bglOnErr(){
   /* 长音轨坏了：立刻退回分段播放，宁可多段接力也不要静音 */
   if(BG.long && BG.playing && !BG.paused){
-    BGL.bad = 1; BG.long = 0;
-    bgPlayChunkLegacy();
+    BGL.bad = 1;
+    bglFallback();
   }
 }
 /* 暂停：只暂停，不卸载、不清断点 */
@@ -13421,7 +13491,7 @@ function bglPause(){
 /* 继续：从当前播放位置接着放，不回到段首（这也是音乐播放器的行为） */
 function bglResume(){
   var el = bglEl();
-  if(!BGL.ready){ bglStart(BG.idx); return; }
+  if(!BGL.ready){ bglStart(BGL.cur >= 0 ? BGL.cur : BG.idx); return; }
   if(el.paused){ try{ el.play(); }catch(e){} }
   bglSyncFromElement();
   bgMetaSet();
@@ -13485,6 +13555,7 @@ function bgSleepFinish(reason){
 }
 function bgSleepPlayCur(start){
   if(!BG.playing || BG.paused) return;
+  if(BG.longSleep) return;                         /* v33：息屏铺底期间由长音轨接管，句包暂停推进 */
   /* v27：到点且开着自动收尾时不再开新句（这一句结束才走到这里，所以不会截断当前句） */
   if(bgSleepAutoOn() && bgLeft() <= 0){ bgSleepFinish("timeup"); return; }
   var pk = bgSleepPoolOf();
@@ -13582,6 +13653,81 @@ function bgSleepNextRound(){
   bgSleepPlayCur(0);
 }
 
+/* ===== v33：睡前听「息屏长音轨铺底，亮屏回句子复习」 =====
+   动机：v28 的息屏顶播是"一段音频放完再由段尾回调接下一段"，浏览器在息屏后一旦挂起回调，
+        声音就断在半空（表现为"放完一段要亮屏才有声"）。工作听 v32 换成一条长音轨后息屏不断，
+        这里把同一套机制搬到睡前听的息屏时段。
+   口径：息屏 = 铺底（连续、不断、不换源）；亮屏 = 立刻切回句子复习，并从"息屏那一刻该念的那一句"接着念，
+        不静默跳过任何一句。轮次、断点、词曝光都不被铺底篡改。 */
+/* 从预生成音频地址反查它属于第几段（睡前背景段取自全库，不能像工作听那样按口音集合归一） */
+function bgWorkIndexOfA(a){
+  if(!a) return -1;
+  for(var i = 0; i < BG_WORK.length; i++){
+    if(BG_WORK[i] && BG_WORK[i].a === a) return i;
+  }
+  return -1;
+}
+/* 涉屏进入铺底：冻结句包进度 → 停掉正在放的 → 长音轨接管，一次 play 到底 */
+function bgSleepEnterLong(){
+  if(!BG.playing){ return; }
+  if(BG.paused){ BG.sleepPend = 1; return; }      /* 暂停中：等点继续时再切，别在暂停状态偷偷出声 */
+  BG.sleepPend = 0;
+  if(BG.longSleep) return;
+  var it = 0, g = (BG.rounds | 0), cur = null;
+  try{
+    if(BG.sq){
+      it = (BG.sq.p | 0);
+      g = (BG.sq.g | 0);
+      cur = BG.sq.items ? BG.sq.items[it] : null;
+    }
+  }catch(e){ cur = null; }
+  BG.sleepHold = { it: it, g: g };                /* 亮屏后从这一条接着念 */
+  BG.longSleep = 1;
+  /* 先把旧管线彻底停住：段尾回调在息屏后不可靠，留着会和新音轨抢着出声 */
+  BG.seqToken++;
+  BG.speaking = 0;
+  if(BG.gapTimer){ clearTimeout(BG.gapTimer); BG.gapTimer = null; }
+  if(BG.fadeReset){ try{ BG.fadeReset(); }catch(e){} }
+  if(BG.audio && BG.audioAbort){ try{ BG.audioAbort(); }catch(e){} }
+  if(BG.audio){ try{ BG.audio.pause(); }catch(e){} BG.audio = null; }
+  BG.audioAbort = null;
+  try{ stopSpeak(); }catch(e){}
+  /* 起点：优先接着当前那条的音频，其次沿用慢速轮转指针，绝不回到第 0 段 */
+  var w = -1;
+  if(cur && cur.k === "mp3" && cur.idx != null) w = bgNormAny(cur.idx);
+  else if(cur && cur.seg && cur.seg.a) w = bgWorkIndexOfA(cur.seg.a);
+  if(w < 0) w = bgNormAny(BG.sleepA | 0);
+  BGL.bad = 0;
+  bglStart(w);
+  try{ bgMetaSet(); }catch(e){}
+  bgPaintClock();
+  try{ render(); }catch(e){}
+}
+/* 亮屏退出铺底：停长音轨 → 按冻结的进度把那一句重新念出来 */
+function bgSleepExitLong(){
+  if(!BG.longSleep) return;
+  BG.longSleep = 0;
+  BG.long = 0;
+  try{ bgAddHiddenGap(); }catch(e){}              /* 把息屏这段的真实发声补进统计 */
+  try{ if(BGL.el) BGL.el.pause(); }catch(e){}
+  BGL.prevCt = null; BGL.cur = -1;
+  var hold = BG.sleepHold;
+  BG.sleepHold = null;
+  if(!BG.playing || BG.paused){ BG.sleepPend = 0; return; }
+  BG.sleepPend = 0;
+  bgSleepPlayCur(hold ? (hold.it | 0) : 0);
+}
+/* 涉屏切换只挂一次；只在睡前听、且正在播时生效（工作听由 v32 自己的逻辑全程连播，不用切） */
+function bgSleepVisBind(){
+  if(BG.sleepVis) return;
+  BG.sleepVis = 1;
+  document.addEventListener("visibilitychange", function(){
+    if(BG.mode !== "sleep" || !BG.playing) return;
+    if(document.visibilityState === "hidden"){ bgSleepEnterLong(); return; }
+    bgSleepExitLong();
+  });
+}
+
 function bgTick(quiet){
   if(!BG.playing) return;
   var el = bgElapsed();
@@ -13640,6 +13786,11 @@ function bgGoalLine(){
 function bgSubLine(){
   if(BG.paused) return "已暂停 · 点继续接着放";
   if(BG.mode === "sleep"){
+    /* v33：息屏铺底期间如实说明"在铺底"，别让人以为句子复习还在走 */
+    if(BG.longSleep){
+      var _t = bgLeft() <= 120 ? " · 收尾中" : "";
+      return "息屏铺底中 · 连续慢放不换段 · 亮屏立刻回到第 " + ((BG.sleepHold ? BG.sleepHold.it : 0) + 1) + " 句" + _t;
+    }
     if(!bgSleepAutoOn() && bgLeft() <= 0){
       return "第 " + (BG.rounds + 1) + " 轮 · 语速 " + bgSleepRate() + "x · 已过 " + BG.mins + " 分钟（自动收尾已关，仍在放）";
     }
@@ -13738,6 +13889,8 @@ function bgStop(complete){
   if(BG.gapTimer){ clearTimeout(BG.gapTimer); BG.gapTimer = null; }
   BG.mp3Retry = 0;                                            /* v28：停就清掉息屏自动重试标记 */
   if(BG.long){ bglStop(); BG.long = 0; }                      /* v32：连播身份解除，音轨暂停留存 */
+  BG.longSleep = 0; BG.sleepHold = null; BG.sleepPend = 0;    /* v33：停止/收尾时退出铺底，别再亮屏切回来 */
+  try{ bgAddHiddenGap(); }catch(e){}                          /* v33：先把息屏那段的真实发声补进统计再收尾 */
   if(BG.fadeReset){ try{ BG.fadeReset(); }catch(e){} }        /* v23：清掉段间淡出定时器 */
   if(BG.audio && BG.audioAbort){ try{ BG.audioAbort(); }catch(e){} }
   if(BG.audio){ try{ BG.audio.pause(); }catch(e){} BG.audio = null; }
