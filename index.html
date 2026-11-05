@@ -3964,6 +3964,8 @@ var DB = { srs:{}, days:{}, use:{}, goal:20, rate:0.92, voice:"", acc:"us", wake
   /* v24：有效门槛三档（秒）600/1200/1800，默认 600；非法值一律回落 600
      bgGoalTs 是档位修改时间，同步与快照按它取较新，旧数据不能把档位降回去 */
   bgGoal:600, bgGoalTs:0,
+  /* v35：交传/同传取材难度档（A2/B1/B2/C1，默认 B1 基础），只影响取材筛选，不影响其他模块 */
+  iprLv:"B1",
   /* v25：口音筛选（all/us/uk/au/in），只影响工作听轮转集合；bgAccTs 用于同步取较新 */
   bgAcc:"all", bgAccTs:0,
   /* v27：睡前听时长档位（10/15/20/30，默认 15 分钟）与「到点自动收尾」开关（1=到点收尾，0=继续播到手动停）。
@@ -11501,12 +11503,176 @@ var SHADOW_POOL = (function(){
   return out;
 })();
 
+/* ================= v35：交传/同传自动取材 =================
+   取材优先级：当天新增（daily.json 当天抓到的文章）→ 库内最新一批 → 库内随机旧文；
+   难度按「我的等级」筛选，A2/B1/B2/C1 映射到源站 L1/L2/L3。
+   素材库文章没有中文译文，所以 cn 留空，界面改为「原文 + 关键词」自评对照。 */
+var INTERP_BUILTIN = INTERP_SEGS;
+var IPR = { segs:null, busy:false, err:"", note:"", built:0 };
+var IPR_LV = {
+  A2:{ nil:[1],   label:"A2 入门" },
+  B1:{ nil:[1,2], label:"B1 基础" },
+  B2:{ nil:[2,3], label:"B2 进阶" },
+  C1:{ nil:[3],   label:"C1 原速" }
+};
+function iprLv(){ return IPR_LV[DB.iprLv] ? DB.iprLv : "B1"; }
+function iprLvLabel(){ return IPR_LV[iprLv()].label; }
+function iprLvSet(v){ if(!IPR_LV[v]) return; DB.iprLv=v; saveDB(); IPR.segs=null; iprBuild(1); render(); }
+function iprNilOf(it){
+  var raw=(it && it.level!==undefined && it.level!==null) ? String(it.level) : "";
+  return parseInt(raw.replace(/[^0-9]/g,""),10) || 0;
+}
+function iprLvOK(it, nilArr){
+  var n=iprNilOf(it);
+  /* 等级未知的条目只有在中档（B1/B2）才放行，A2/C1 严格按档位筛，避免「C1 原速」里混进 L1 */
+  if(!n) return nilArr.indexOf(1)>=0 && nilArr.indexOf(2)>=0;
+  return nilArr.indexOf(n)>=0;
+}
+function iprShuffle(a){
+  for(var i=a.length-1;i>0;i--){ var j=Math.floor(Math.random()*(i+1)), t=a[i]; a[i]=a[j]; a[j]=t; }
+  return a;
+}
+/* 正文切句：只在「句末标点 + 空格/结尾」处断，过滤过短与超长的碎块 */
+function iprSents(txt){
+  var t=String(txt||"").replace(/\s+/g," ").trim(), out=[], buf="", i, ch, nx, s, w;
+  if(!t) return out;
+  for(i=0;i<t.length;i++){
+    ch=t.charAt(i); buf+=ch;
+    if(ch==="."||ch==="!"||ch==="?"){
+      nx=t.charAt(i+1);
+      if(nx===""||nx===" "||nx==='"'||nx==="'"||nx===")"){
+        s=buf.replace(/\s+/g," ").trim(); buf="";
+        w=s.split(" ").length;
+        if(s.length>=24 && w>=6 && w<=45) out.push(s);
+      }
+    }
+  }
+  return out;
+}
+function iprKeys(it){
+  var k=(it && it.key) ? it.key : null, out=[];
+  if(typeof k==="string") out=k.replace(/[\[\]{}'"]/g," ").split(/[\s,]+/).filter(function(s){ return s && s.length>2; });
+  else if(k && k.length) out=k.slice();
+  if(!out.length && it && it.kw && it.kw.length) out=it.kw.slice();
+  return out.slice(0,6);
+}
+/* 候选：今日新增 → 最新一批 → 库内最新 → 随机旧文，最多 10 篇；
+   同一优先级内打乱顺序，这样点「换一批」在同档素材里也会换，而不是每次都一模一样 */
+function iprCandidates(cfg, cap){
+  cap=cap||10;
+  var t0=dk(), out=[], seen={}, i, it, dl, lib, rest=[], fresh=[], today=[], latest=[], newest="";
+  function push(x, tag){
+    if(!x || !x.id || seen[x.id]) return;
+    seen[x.id]=1; out.push({ it:x, tag:tag });
+  }
+  dl=dailyItems().slice();
+  for(i=0;i<dl.length;i++){ var d0=String(dl[i].date||"").slice(0,10); if(d0>newest) newest=d0; }
+  for(i=0;i<dl.length;i++){
+    it=dl[i]; if(!iprLvOK(it,cfg.nil)) continue;
+    var d1=String(it.date||"").slice(0,10);
+    if(d1===t0) today.push(it); else if(d1===newest) latest.push(it);
+  }
+  iprShuffle(today); iprShuffle(latest);
+  for(i=0;i<today.length && out.length<cap;i++) push(today[i],"今日新增");
+  for(i=0;i<latest.length && out.length<cap;i++) push(latest[i],"最新一批");
+  lib=libItems();
+  for(i=0;i<lib.length;i++){
+    it=lib[i]; if(!iprLvOK(it,cfg.nil)) continue;
+    var d2=String(it.date||"").slice(0,10);
+    if(d2===t0 || d2===newest) fresh.push(it); else rest.push(it);
+    if(fresh.length>=20 && rest.length>=300) break;
+  }
+  iprShuffle(fresh); iprShuffle(rest);
+  for(i=0;i<fresh.length && out.length<cap;i++) push(fresh[i],"库内最新");
+  for(i=0;i<rest.length && out.length<cap;i++) push(rest[i],"随机旧文");
+  return out;
+}
+function iprText(x){
+  var it=x.it;
+  if(it && it.text) return Promise.resolve(String(it.text));
+  return libEnsureBody(it.id).then(function(b){ return (b && b.text) || ""; });
+}
+function iprBuild(force){
+  if(IPR.busy) return;
+  IPR.busy=true; IPR.err="";
+  var cfg=IPR_LV[iprLv()], t0=Date.now();
+  function finish(segs, note, err){
+    IPR.busy=false;
+    if(segs && segs.length){
+      INTERP_SEGS=segs; IPR.segs=segs; IPR.note=note||""; IPR.err=""; IPR.built=Date.now();
+    } else {
+      INTERP_SEGS=INTERP_BUILTIN; IPR.segs=null; IPR.err=err||"暂时取不到素材";
+    }
+    if(CURRENT==="trans") render();
+  }
+  function compose(){
+    /* 换一批时候选池放大到 24，保证连续点几次「换一批」都有没用过的素材 */
+    var list=iprCandidates(cfg, force?24:14), i, segs=[], limit, newN=0, oldN=0;
+    var used=(IPR.used=IPR.used||{});
+    /* 换一批：优先给没出现过的素材；同档素材用完了才允许重复，避免「换一批」只是换个顺序 */
+    if(force && list.length){
+      var pick=[], k;
+      for(k=0;k<list.length;k++){ if(!used[list[k].it.id]) pick.push(list[k]); }
+      if(pick.length>=4) list=pick;
+    }
+    if(list.length<4){
+      /* 不再放宽等级凑数：宁可少几组，也不让 C1 混进 L1 */
+      if(!list.length) return finish(null,"","素材库取不到内容，先用内置材料");
+    }
+    limit=Math.min(list.length,8);
+    function step(k){
+      if(k>=limit) return done();
+      iprText(list[k]).then(function(txt){
+        var ss=iprSents(txt), j;
+        for(j=0;j+3<ss.length;j+=4){
+          segs.push({ topic:String(list[k].it.title||"素材").slice(0,42),
+                      level:"L"+(iprNilOf(list[k].it)||"-"),
+                      en:ss.slice(j,j+4), cn:[], fromLib:1,
+                      tag:list[k].tag, source:(list[k].it.src||"素材库"),
+                      url:list[k].it.url||"", bid:list[k].it.id,
+                      keys:iprKeys(list[k].it) });
+          break;
+        }
+        step(k+1);
+      }).catch(function(){ step(k+1); });
+    }
+    function done(){
+      if(!segs.length) return finish(null,"","正文没取到，先用内置材料");
+      for(i=0;i<segs.length;i++){ if(segs[i].tag==="随机旧文") oldN++; else newN++; if(segs[i].bid) used[segs[i].bid]=1; }
+      /* 只在素材库完全取不到（离线/加载失败）时才用内置材料补齐；库正常时宁可少几组也不掺错难度 */
+      var extra=0, libOK=!!(LIB.idx && LIB.idx.items && LIB.idx.items.length);
+      if(!libOK && segs.length<8 && typeof INTERP_BUILTIN!=="undefined" && INTERP_BUILTIN.length){
+        for(i=0;i<INTERP_BUILTIN.length && segs.length<8;i++){
+          var b=INTERP_BUILTIN[i];
+          segs.push({ topic:b.topic, level:"-", en:b.en.slice(), cn:(b.cn||[]).slice(),
+                      fromLib:0, tag:"内置", source:"内置材料", url:"", bid:"",
+                      keys:(b.keys||[]).slice() });
+          extra++;
+        }
+      }
+      finish(segs, "自动取材 "+segs.length+" 组 · 新增向 "+newN+" 组 · 旧文随机 "+oldN+" 组"
+        + (extra?(" · 内置补 "+extra+" 组"):"") + " · "+iprLvLabel(), "");
+    }
+    step(0);
+  }
+  dailyLoad(false); libLoad(false);
+  (function wait(){
+    var dOK=!!DAILY.data;
+    var lOK=!!(LIB.idx && LIB.idx.items && LIB.idx.items.length);
+    if(dOK && lOK) return compose();
+    if(Date.now()-t0>15000) return compose();
+    setTimeout(wait, 250);
+  })();
+}
+function iprShuffleMat(){ IPR.segs=null; iprBuild(1); render(); }
+
 /* ---------------- 交传 CI ---------------- */
 var INTERP_MODE = "ci";
 function iprPick(m){
   INTERP_MODE=m;
   CI.stage=(m==="ci")?"pick":"idle";
   SI.stage=(m==="si")?"pick":"idle";
+  if(!IPR.segs && !IPR.busy) iprBuild(0);
   render();
 }
 function iprHome(){ CI.stage="idle"; SI.stage="idle"; render(); }
@@ -11634,7 +11800,7 @@ function htmlInterp(){
       '<div class="segtime"><span class="num">3</span><div class="txt">不许等"完美句子"<small>同传里卡住一句，后面三句就全丢了。说错就往前推</small></div></div>'+
       '<div class="segtime"><span class="num">4</span><div class="txt">每次都要自评<small>准确 / 能听懂但不准 / 漏译，三档就够，别打模糊分</small></div></div>'+
       '</div>';
-    h+='<div class="tiny muted center" style="margin-top:4px;line-height:1.7">材料全部内置，不联网也能练。手机双击打开即可，麦克风需本地服务器。</div>';
+    h+='<div class="tiny muted center" style="margin-top:4px;line-height:1.7">材料每天自动取：当天新增优先，不够取库内随机旧文，按你的等级筛难度。断网时回落到内置材料。</div>';
     return h;
   }
 
@@ -11643,11 +11809,31 @@ function htmlInterp(){
     var isCI = (INTERP_MODE!=="si");
     h+='<div class="hd" style="margin-top:8px"><h3>'+(isCI?"交传 · 选材料":"同传 · 选材料")+'</h3>'+
        '<span class="right"><button class="mini" onclick="iprHome()">返回</button></span></div>';
+
+    /* v35：取材来源与难度，全部由当前素材库自动取，不再写死 */
+    h+='<div class="card flat">'+
+      '<div class="row"><div style="flex:1"><div class="small" style="font-weight:700">自动取材</div>'+
+      '<div class="tiny muted" style="line-height:1.7;margin-top:4px">'+
+        (IPR.busy ? '正在按「'+esc(iprLvLabel())+'」从今日素材和素材库里取材…'
+                  : (IPR.note ? esc(IPR.note) : (IPR.err ? esc(IPR.err) : '还没取材'))) +
+      '</div></div>'+
+      '<button class="mini" onclick="iprShuffleMat()"'+(IPR.busy?' disabled':'')+'>换一批</button></div>'+
+      '<div class="small muted" style="margin:10px 0 6px">我的等级（只影响取材难度）</div>'+
+      '<div class="seg">'+
+        '<button class="'+(iprLv()==="A2"?"on":"")+'" onclick="iprLvSet(\'A2\')">A2</button>'+
+        '<button class="'+(iprLv()==="B1"?"on":"")+'" onclick="iprLvSet(\'B1\')">B1</button>'+
+        '<button class="'+(iprLv()==="B2"?"on":"")+'" onclick="iprLvSet(\'B2\')">B2</button>'+
+        '<button class="'+(iprLv()==="C1"?"on":"")+'" onclick="iprLvSet(\'C1\')">C1</button>'+
+      '</div>'+
+      '<div class="tiny muted" style="margin-top:8px;line-height:1.7">取材顺序：当天新增优先 → 库内最新一批 → 随机旧文。素材库文章没有中文译文，练完显示原文和关键词，自己对着核。</div>'+
+      '</div>';
+
     for(var i=0;i<INTERP_SEGS.length;i++){
       var s=INTERP_SEGS[i];
       h+='<div class="card tight" style="cursor:pointer" onclick="'+(isCI?('ciStart('+i+')'):('siStart('+i+')'))+'">'+
          '<div class="row"><div style="flex:1"><div style="font-weight:750;font-size:14.5px">'+esc(s.topic)+'</div>'+
-         '<div class="tiny muted">'+s.en.length+' 句 · '+esc(s.level)+' · 约 '+Math.round(s.en.join(" ").split(/\s+/).length/2.2)+' 秒</div></div>'+
+         '<div class="tiny muted">'+s.en.length+' 句 · '+esc(s.level)+' · 约 '+Math.round(s.en.join(" ").split(/\s+/).length/2.2)+' 秒'+
+         (s.tag?(' · '+esc(s.tag)):'')+(s.source?(' · '+esc(s.source)):'')+'</div></div>'+
          '<span class="chip plain">'+(isCI?"交传":"同传")+'</span></div></div>';
     }
     if(isCI){
@@ -11709,7 +11895,7 @@ function htmlInterp(){
       for(var k=0;k<seg.en.length;k++){
         var jd=j[k];
         h+='<div class="segtime"><span class="num">'+(k+1)+'</span><div class="txt">'+esc(seg.en[k])+
-           '<small>'+esc(seg.cn[k])+'</small>'+
+           '<small>'+((seg.cn && seg.cn[k]) ? esc(seg.cn[k]) : '（无参考译文，对照原文自评）')+'</small>'+
            (jd!==undefined?'<small style="color:'+(jd>=2?"var(--green-d)":(jd===1?"var(--amber)":"var(--red)"))+'">自评：'+(jd>=2?"准确":jd===1?"能懂但不准":"漏译")+'</small>':'')+
            '</div></div>';
       }
@@ -11741,9 +11927,13 @@ function htmlInterp(){
          '<textarea id="ciSaid" placeholder="中文译出来…" style="min-height:70px" oninput="ciSaid(this)">'+esc(CI.said)+'</textarea></div>';
       h+='<div class="row" style="margin-top:12px;gap:8px">'+
          '<button class="btn sm gray" onclick="ciReplay()">再听一遍</button>'+
-         '<button class="btn" style="flex:1" onclick="ciReveal()">看参考译文</button></div>';
+         '<button class="btn" style="flex:1" onclick="ciReveal()">'+((seg.cn && seg.cn[CI.i]) ? "看参考译文" : "看原文对照")+'</button></div>';
     } else if(CI.stage==="reveal"){
-      h+='<div class="cue">'+esc(seg.en[CI.i])+'<span class="cnline">参考：'+esc(seg.cn[CI.i])+'</span></div>';
+      var refCn = (seg.cn && seg.cn[CI.i]) ? String(seg.cn[CI.i]) : "";
+      h+='<div class="cue">'+esc(seg.en[CI.i])+
+         (refCn ? '<span class="cnline">参考：'+esc(refCn)+'</span>'
+                : '<span class="cnline">素材库原文没有参考译文：先回想自己怎么译的，再用关键词核对</span>')+'</div>';
+      if(!refCn && seg.keys && seg.keys.length) h+='<div class="tiny muted" style="margin-top:8px">关键词：'+esc(seg.keys.join(" · "))+'</div>';
       if(CI.said) h+='<div class="fb" style="margin-top:10px"><b>你说的</b>　'+esc(CI.said)+'</div>';
       h+='<div class="small muted" style="margin:14px 0 8px">这一句你译得怎么样？</div>';
       h+='<div class="grid3">'+
@@ -11779,7 +11969,7 @@ function htmlInterp(){
       h+='<div class="h2">逐句复盘<span class="ln"></span></div>';
       for(var m=0;m<sg.en.length;m++){
         h+='<div class="segtime"><span class="num">'+(m+1)+'</span><div class="txt">'+esc(sg.en[m])+
-           '<small>'+esc(sg.cn[m])+'</small>'+
+           '<small>'+((sg.cn && sg.cn[m]) ? esc(sg.cn[m]) : '（无参考译文，对照原文自评）')+'</small>'+
            '<div class="row" style="gap:6px;margin-top:6px">'+
            '<button class="mini '+(jj[m]===2?"on":"")+'" onclick="siJudge('+m+',2)">跟住且准</button>'+
            '<button class="mini '+(jj[m]===1?"on":"")+'" onclick="siJudge('+m+',1)">跟住不准</button>'+
