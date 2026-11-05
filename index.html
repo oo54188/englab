@@ -4459,6 +4459,17 @@ function lsWakeSync(){
 }
 /* 页面可见性/离开：先处理朗读断点与计时，再补回常亮锁（隐藏时锁会被系统自动释放） */
 document.addEventListener("visibilitychange", function(){ spkVis(); });
+/* v28：回到前台的自愈。安卓在息屏那一刻可能把页面连同音频一起冻住，
+   回来时状态还是「播放中」但其实什么都没有在响——这时直接从当前段续上，
+   不用等用户点「继续」，也不会因为回前台就从头重放同一段 */
+document.addEventListener("visibilitychange", function(){
+  if(document.visibilityState !== "visible") return;
+  if(typeof BG === "undefined" || !BG || !BG.playing || BG.paused) return;
+  if(BG.audio && BG.audio.paused === false) return;   /* 真的还在响，不动 */
+  if(BG.speaking) return;
+  if(BG.gapTimer){ clearTimeout(BG.gapTimer); BG.gapTimer = null; }
+  if(BG.mode === "sleep"){ bgSleepPlayCur(null); } else { bgPlayChunk(); }
+});
 window.addEventListener("pagehide", function(){ spkGone(); });
 /* --- 锁屏媒体会话：让系统把朗读认成"正在播放媒体"，锁屏不被冻结，并出现控制条 ---
    v23：锁屏信息要跟着"当前这一段"走，锁屏上的暂停/上一段/下一段也要真的作用在背景听上。
@@ -11915,17 +11926,39 @@ function bgSaySeq(list, rate, gap, done){
   next();
 }
 
+/* ===== v28：息屏续播的两根支柱 =====
+   ① 音频元素单例：第一次由用户手势点「开始」时拿到的播放许可会挂在这个元素上，
+      之后只换 src 续播，息屏/后台里新起的 play() 才不会被自动播放策略拒绝；
+   ② bgHidden()：页面不可见（息屏、切后台）时，绝对不能再把「下一段」交给 setTimeout——
+      后台定时器会被系统冻结，声音就停在这一段的结尾，计时却还在走。 */
+function bgAudioEl(){
+  if(!BG.audioEl){
+    var el = new Audio();
+    el.preload = "auto";
+    try{ el.setAttribute("playsinline", ""); el.playsInline = true; }catch(e){}
+    BG.audioEl = el;
+  }
+  return BG.audioEl;
+}
+function bgHidden(){
+  try{ return document.visibilityState === "hidden"; }catch(e){ return false; }
+}
+
 /* 整段 mp3 播放：比逐句 TTS 稳，离线可用；放不出来就回退到朗读 */
 function bgPlayMp3(src, rate, gap, done, fallback){
   var my = ++BG.seqToken;
   /* v24：外部 http(s) 资源拿不到真实时长也不许按标称值入账——
      加载失败/404/跨域被拒/格式不支持时只计 0 并提示，不做朗读回退（回退会凭空造出声音） */
   var isExt = /^https?:/i.test(String(src || ""));
-  var a = new Audio(src);
+  var a = bgAudioEl();                     /* v28：复用一个音频元素，息屏续播沿用同一份播放许可 */
   var r = Math.max(0.5, Math.min(2, rate || 1));
   a.preload = "auto";
   try{ a.preservesPitch = true; a.mozPreservesPitch = true; a.webkitPreservesPitch = true; }catch(e){}
+  /* v28：复用元素的第一件事是把音量复位成 1——上一段淡出结束时音量是 0，
+     不复位的话下一段"在播但没声"，正是最容易被当成"息屏没声音"的那种假故障 */
+  try{ a.volume = 1; }catch(e){}
   a.playbackRate = r;
+  try{ a.src = src; }catch(e){ if(fallback) fallback(); return; }
   BG.audio = a;
   var settled = false, wd = null, iv = null, lastTick = Date.now();
   /* v23 段间淡出：整段是定长 mp3，改不了脚本，只能在段末把音量线性压到 0，
@@ -11960,7 +11993,7 @@ function bgPlayMp3(src, rate, gap, done, fallback){
     fadeStop(true);
     if(wd){ clearTimeout(wd); wd = null; }
     if(iv){ clearInterval(iv); iv = null; }
-    try{ a.onended = null; a.onerror = null; a.ontimeupdate = null; a.pause(); }catch(e){}
+    try{ a.onended = null; a.onerror = null; a.ontimeupdate = null; a.onloadedmetadata = null; a.pause(); }catch(e){}
     if(BG.audio === a) BG.audio = null;
     if(BG.audioAbort && settled) BG.audioAbort = null;
   }
@@ -11972,7 +12005,12 @@ function bgPlayMp3(src, rate, gap, done, fallback){
     if(!BG.playing || my !== BG.seqToken || BG.paused) return;
     if(ok){
       BG.fails = 0;
-      BG.gapTimer = setTimeout(function(){ if(done) done(); }, Math.max(200, gap || 400));
+      /* v28：段间空档只在页面可见时保留。息屏/后台一律同步接下一段——
+         后台 setTimeout 会被系统冻结，声音就断在段尾、计时却还在走，
+         这正是"一息屏就没声音、回来还停在同一段"的直接原因 */
+      var g = bgHidden() ? 0 : Math.max(200, gap || 400);
+      if(g <= 0){ if(done) done(); return; }
+      BG.gapTimer = setTimeout(function(){ if(done) done(); }, g);
       return;
     }
     BG.fails++;
@@ -11982,7 +12020,15 @@ function bgPlayMp3(src, rate, gap, done, fallback){
       bgPause();
       return;
     }
-    if(fallback && BG.fails < 3){ fallback(); return; }
+    if(fallback && BG.fails < 3){
+      /* v28：本地音频缺失是真的会发生的（audio/bg 没跟着部署就是一片 404）。
+         这时只能用系统语音顶上，但必须说清代价：系统语音在息屏后会被挂起 */
+      if(!BG.mp3Miss){
+        BG.mp3Miss = 1;
+        toast("这段的音频文件没加载上，先用系统语音顶上；系统语音一息屏就会停。请在设置里检查网络后重开，或等素材同步完成再听");
+      }
+      fallback(); return;
+    }
     if(BG.fails >= 3){
       BG.fails = 0;
       toast("语音连着几声没发出来，已暂停。检查网络，或在设置里换成系统语音");
@@ -12007,7 +12053,19 @@ function bgPlayMp3(src, rate, gap, done, fallback){
     var rem = (d - a.currentTime) / spd * 1000;
     if(rem > 0 && rem <= FADE_MS) fadeStart();
   };
-  wd = setTimeout(function(){ fin(false); }, 45000);   /* 一段最多十几秒，卡住就别等 */
+  wd = setTimeout(function(){ fin(false); }, 90000);   /* v28：先按 90 秒兜底，拿到真实时长后按段长收紧 */
+  a.onloadedmetadata = function(){
+    /* v28：原来的固定 45 秒会误杀长段——39 秒的段用 0.85 倍速要放 45.9 秒，
+       看门狗先到就会把"正在正常播的段"判成失败，表现就是同一段反复重来 */
+    if(settled) return;
+    try{
+      var d = a.duration, spd = Math.max(0.5, a.playbackRate || 1);
+      if(d && isFinite(d) && d > 0){
+        if(wd){ clearTimeout(wd); wd = null; }
+        wd = setTimeout(function(){ fin(false); }, Math.max(20000, (d / spd) * 1000 + 12000));
+      }
+    }catch(e){}
+  };
   var pr = null;
   try{ pr = a.play(); }catch(e){ fin(false); return; }
   if(pr && pr.catch) pr.catch(function(){ fin(false); });
@@ -12468,6 +12526,19 @@ function bgSleepPlayCur(start){
   }
   bgMetaSet();                                     /* v23 行为不变：锁屏标题显示「睡前听 · 第 N 轮」 */
   var cur = pk.items[it];
+  /* v28：息屏/后台时系统语音（TTS）一定会被系统挂起，句子项直接跳过，只放预生成的整段音频；
+     一整轮都没有音频段可放时如实暂停，绝不空转刷轮次、也不假装还在念 */
+  if(cur.k !== "mp3" && bgHidden()){
+    pk.skip = (pk.skip | 0) + 1;
+    if(pk.skip >= pk.items.length){
+      bgPause();
+      toast("息屏时只能放预生成的整段音频；这一轮没有音频段，已暂停。亮屏后点继续，接着念今天的句子");
+      return;
+    }
+    bgSleepPlayCur(it + 1);
+    return;
+  }
+  pk.skip = 0;
   if(cur.k === "mp3"){
     var seg = cur.seg || BG_WORK[cur.idx] || null;
     if(seg && seg.a){
