@@ -8766,7 +8766,7 @@ function shadowMineBuild(force){
   if(!words.length) return finish(null,"","词网里还没有「只碰过听/读/看、说和写都是 0」的词。先去听和读，把词碰出来再回来。");
   dailyLoad(false); libLoad(false);
   function compose(){
-    var cands=iprCandidates(cfg,24), pool=[], idx=0;
+    var cands=iprCandidates(cfg,40), pool=[], idx=0;
     function earlyHit(){
       var hit=0, i, w, re;
       for(i=0;i<words.length;i++){
