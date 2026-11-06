@@ -1,5 +1,5 @@
 ﻿/* EngLab Service Worker — 让应用断网也能打开 */
-const VERSION = 'englab-v38';   /* 改过 audio/bg 下的 mp3 必须一起改这里，否则用户拿到旧缓存 */
+const VERSION = 'englab-v39';   /* 改过 audio/bg 下的 mp3 必须一起改这里，否则用户拿到旧缓存 */
 const CORE = [
   './',
   './index.html',
