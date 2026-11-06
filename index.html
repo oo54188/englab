@@ -6024,7 +6024,7 @@ function micSelfPanel(btn, wrap, target, url, sec, why, st){
   h+='<div class="row" style="margin-top:6px">';
   for(var i=1;i<=5;i++) h+='<button class="btn sm ghost" onclick="micSelf(\''+wrap.id+'\','+i+')">'+i+'</button>';
   h+='</div>';
-  h+='<div class="tiny muted" style="margin-top:6px">1-2 分：明天重练这一句；3 分：正常计入；4-5 分：计入并标为掌握得不错。</div>';
+  h+='<div class="tiny muted" style="margin-top:6px">1-2 分：自动进「待重练」队列，下次进来说页顶上就能看到；3 分：正常计入；4-5 分：计入并标为掌握得不错。</div>';
   rEl.innerHTML=h;
 }
 function micSelf(wrapId, score){
@@ -6054,6 +6054,25 @@ function micSelf(wrapId, score){
     afterWord: wv?(wv.afterWord|0):0,
     verdict: wv?(wv.verdict||""):"" });
   if(DB.sayLog.length>200) DB.sayLog=DB.sayLog.slice(-200);
+  /* v36：自评 1-2 分自动进「待重练」队列，之后录到 3 分以上自动出队。
+     这样低分不再是弹个 toast 就没了，而是变成下次进来必须先清掉的债。 */
+  try{
+    var tg=target.replace(/\s+/g," ").trim().slice(0,120);
+    if(tg){
+      if(!(DB.sayRetry instanceof Array)) DB.sayRetry=[];
+      var ri, hit=-1;
+      for(ri=0;ri<DB.sayRetry.length;ri++){
+        if(DB.sayRetry[ri] && String(DB.sayRetry[ri].t||"").toLowerCase()===tg.toLowerCase()){ hit=ri; break; }
+      }
+      if(score<=2){
+        if(hit>=0){ DB.sayRetry[hit].d=dk(); DB.sayRetry[hit].score=score; DB.sayRetry[hit].n=(DB.sayRetry[hit].n|0)+1; }
+        else DB.sayRetry.push({ d:dk(), t:tg, score:score, n:1 });
+        if(DB.sayRetry.length>40) DB.sayRetry=DB.sayRetry.slice(-40);
+      } else if(hit>=0 && score>=3){
+        DB.sayRetry.splice(hit,1);
+      }
+    }
+  }catch(e){}
   saveDB();
   if(wrap){
     var rEl=wrap.querySelector(".res");
@@ -6187,6 +6206,199 @@ function waveBarsHtml(st){
     h+='<i class="'+(b.sil?"sil":"")+'" style="height:'+Math.max(6,Math.round(b.h*100))+'%"></i>';
   }
   return h+'</div><div class="wvlg"><span><i class="dot"></i>发声</span><span><i class="dot sil"></i>静音段</span><span>每段约 '+Math.max(1,Math.round(st.dur/st.bars.length*100)/100)+'s</span></div>';
+}
+/* ===== v36：口语纵向看板 / 话题卡判定 / 待重练队列 =====
+   数据源全部本地：DB.sayLog（录音能量分析入库）、DB.earP（辨音对错累计）、DB.sayRetry（重练队列）。
+   不依赖语音识别、不发网络请求。 */
+function sayStat(off){
+  var r=wkRange(off), days=wkDays(r), seen={}, i;
+  for(i=0;i<days.length;i++) seen[days[i]]=1;
+  var arr=(DB.sayLog instanceof Array)? DB.sayLog : [];
+  var n=0, selfN=0, topicN=0, sec=0, wSum=0, wN=0, pSum=0, pN=0, lMax=0, scSum=0, scN=0;
+  for(i=0;i<arr.length;i++){
+    var o=arr[i];
+    if(!o) continue;
+    if(!seen[dk(new Date(o.t||0))]) continue;
+    n++; sec+=(o.sec|0);
+    if(o.mode==="topic") topicN++; else selfN++;
+    if((o.wpm|0)>0){ wSum+=(o.wpm|0); wN++; }
+    pSum+=(o.pauses|0); pN++;
+    if((o.longest||0)>lMax) lMax=o.longest||0;
+    if((o.score|0)>0){ scSum+=(o.score|0); scN++; }
+  }
+  var ep=(DB.earP && typeof DB.earP==="object")? DB.earP : {};
+  var pairs=[], k, earN=0, earW=0;
+  for(k in ep){
+    if(!ep[k]) continue;
+    var a=ep[k].r|0, b=ep[k].w|0;
+    if(a+b<=0) continue;
+    pairs.push({ k:k, r:a, w:b, rate:Math.round(a/(a+b)*100) });
+    earN+=a+b; earW+=b;
+  }
+  pairs.sort(function(x,y){ return x.rate-y.rate; });
+  return {
+    r:r, n:n, any:(n>0),
+    selfN:selfN, topicN:topicN,
+    min:Math.round(sec/6)/10,
+    wpm: wN? Math.round(wSum/wN) : 0,
+    pauseAvg: pN? Math.round(pSum/pN*10)/10 : 0,
+    longMax: Math.round(lMax*10)/10,
+    scoreAvg: scN? Math.round(scSum/scN*10)/10 : 0,
+    retry:(DB.sayRetry instanceof Array)? DB.sayRetry.length : 0,
+    pairs:pairs, earN:earN, earW:earW,
+    earAcc: earN? Math.round((earN-earW)/earN*100) : 0
+  };
+}
+/* 「说」页顶部：本周客观数据 + 环比。空白时就地教怎么录入，不留空卡 */
+function sayMiniCard(){
+  var S=sayStat(0), P=sayStat(-1);
+  var h='<div class="card tight"><div class="hd"><h3>本周口语</h3><div class="right"><span class="chip">'+esc(wkLabel(S.r))+'</span></div></div>';
+  if(!S.any){
+    h+='<div class="small muted" style="line-height:1.85">本周还没录过音。在跟读或话题卡里录一段，停顿次数、发声占比、语速会自动算出来（不需要语音识别），下周这里就有环比。</div>';
+  }else{
+    h+='<div class="grid3 stats">'+
+      '<div class="stat"><b>'+S.min+'</b><span>开口分钟</span></div>'+
+      '<div class="stat"><b>'+(S.wpm||"—")+'</b><span>平均 wpm</span></div>'+
+      '<div class="stat"><b>'+S.pauseAvg+'</b><span>平均停顿</span></div>'+
+      '</div>';
+    var d='';
+    if(P.any){
+      d='比上周：开口 '+wkDelta(Math.round((S.min-P.min)*10)/10," 分钟")+
+        (S.wpm&&P.wpm? (' · 语速 '+wkDelta(S.wpm-P.wpm," wpm")):'')+
+        (P.pauseAvg? (' · 停顿 '+wkDelta(Math.round((S.pauseAvg-P.pauseAvg)*10)/10," 次")):'');
+    }
+    h+='<div class="small" style="margin-top:8px">'+ (d|| '<span class="tiny muted">上周没有口语记录，下周才有环比</span>') +'</div>';
+    if(S.pairs.length) h+='<div class="small" style="margin-top:5px">最不稳的辨音：'+esc(S.pairs[0].k)+'（正确率 '+S.pairs[0].rate+'%）</div>';
+  }
+  h+='</div>';
+  return h;
+}
+/* 待重练队列：自评 1-2 分的句子自动进队，录到 3 分以上自动出队 */
+function sayRetryCard(){
+  var arr=(DB.sayRetry instanceof Array)? DB.sayRetry : [];
+  if(!arr.length) return "";
+  var h='<div class="card tight"><div class="hd"><h3>待重练 '+arr.length+' 句</h3><div class="right"><span class="chip">上次自评 1–2 分</span></div></div>';
+  var n=0, i;
+  for(i=arr.length-1;i>=0 && n<4;i--,n++){
+    var it=arr[i]||{};
+    var tg=String(it.t||"");
+    h+='<div style="padding:7px 0;border-bottom:1px dashed var(--line)">'+
+       '<div class="small" style="line-height:1.7">'+esc(tg)+'</div>'+
+       '<div class="row" style="margin-top:6px;gap:6px;flex-wrap:wrap">'+
+       '<button class="btn sm ghost" onclick="speak('+esc(JSON.stringify(tg)).replace(/"/g,"&quot;")+')">▶ 听示范</button>'+
+       '<button class="btn sm ghost" onclick="sayRetryDel('+i+')">已经说顺了，移除</button>'+
+       '</div></div>';
+  }
+  h+='<div class="tiny muted" style="margin-top:7px;line-height:1.8">重录这一句自评 3 分以上会自动出队。连着 3 次都只有 1-2 分，说明不是口的问题，是这句里的词还没熟。</div></div>';
+  return h;
+}
+function sayRetryDel(i){
+  if(!(DB.sayRetry instanceof Array)) return;
+  DB.sayRetry.splice(i,1);
+  saveDB();
+  render();
+  toast("已移出待重练");
+}
+/* 我的页：口语进步卡（本周 vs 上周） */
+function sayBoardHtml(){
+  var S=sayStat(0), P=sayStat(-1);
+  var h='<div class="card"><div class="hd"><h3>口语进步</h3><div class="right"><span class="chip">'+esc(wkLabel(S.r))+'</span></div></div>';
+  if(!S.any){
+    h+='<div class="small muted" style="line-height:1.9">本周还没有口语记录。去「说」录一段：录完会自动算出停顿次数、发声占比与语速，存在本机，下周这里就有对比。</div>'+
+       '<div class="row" style="margin-top:10px"><button class="btn sm" onclick="go(\'output\',\'say\')">去练口语</button></div></div>';
+    return h;
+  }
+  h+='<div class="grid3 stats">'+
+    '<div class="stat"><b>'+S.min+'</b><span>开口分钟</span></div>'+
+    '<div class="stat"><b>'+(S.wpm||"—")+'</b><span>平均 wpm</span></div>'+
+    '<div class="stat"><b>'+S.pauseAvg+'</b><span>平均停顿次数</span></div>'+
+    '</div>';
+  h+='<div class="grid3 stats" style="margin-top:8px">'+
+    '<div class="stat"><b>'+(S.scoreAvg||"—")+'</b><span>自评均分</span></div>'+
+    '<div class="stat"><b>'+(S.longMax||0)+'s</b><span>最长停顿</span></div>'+
+    '<div class="stat"><b>'+(S.retry||0)+'</b><span>待重练</span></div>'+
+    '</div>';
+  h+='<div class="small" style="margin-top:9px;line-height:1.85">跟读 <b>'+S.selfN+'</b> 次 · 话题卡 <b>'+S.topicN+'</b> 张'+
+     (S.earN? (' · 辨音正确率 <b>'+S.earAcc+'%</b>（'+S.earN+' 题）'):'')+'</div>';
+  if(P.any){
+    h+='<div class="small" style="margin-top:5px">比上周：开口 '+wkDelta(Math.round((S.min-P.min)*10)/10," 分钟")+
+      (S.wpm&&P.wpm? (' · 语速 '+wkDelta(S.wpm-P.wpm," wpm")):'')+
+      (P.pauseAvg? (' · 平均停顿 '+wkDelta(Math.round((S.pauseAvg-P.pauseAvg)*10)/10," 次")):'')+
+      (S.scoreAvg&&P.scoreAvg? (' · 自评 '+wkDelta(Math.round((S.scoreAvg-P.scoreAvg)*10)/10,"")):'')+'</div>';
+  }else{
+    h+='<div class="tiny muted" style="margin-top:6px">上周没有口语记录，下周才有环比。</div>';
+  }
+  if(S.pairs.length){
+    var pj=[], pi;
+    for(pi=0;pi<S.pairs.length && pi<3;pi++) pj.push('<b>'+esc(S.pairs[pi].k)+'</b> '+S.pairs[pi].rate+'%');
+    h+='<div class="small" style="margin-top:6px">最不稳的辨音：'+pj.join(' · ')+'</div>';
+  }
+  if(S.retry) h+='<div class="fb warn" style="margin-top:9px">还有 <b>'+S.retry+'</b> 句自评 1–2 分没重练完，去「说 → 跟读」顶部取用。</div>';
+  h+='<div class="row" style="margin-top:10px;gap:8px;flex-wrap:wrap"><button class="btn sm" onclick="go(\'output\',\'say\')">去练口语</button>'+
+     (S.retry? '<button class="btn sm ghost" onclick="go(\'output\',\'say\')">清待重练</button>':'')+'</div></div>';
+  return h;
+}
+/* 复盘页：口语客观记录卡（与「我的」页看板同源，但按周切换） */
+function sayWeekCard(off){
+  var SG=sayStat(off), PG=sayStat(off-1);
+  var h='<div class="card"><div class="hd"><h3>口语（客观记录）</h3><span class="sub">录音能量分析 · 不依赖语音识别</span></div>';
+  if(!SG.any){
+    h+='<div class="small muted" style="line-height:1.9">这一周没有口语记录。录入方式：跟读或话题卡里录一段（本地算能量，不用识别），停顿与语速会自动进这张表。</div>';
+  } else {
+    h+=wkLine("开口时长", SG.min+" 分钟 · 跟读 "+SG.selfN+" 次 / 话题卡 "+SG.topicN+" 张",
+      (PG.any? wkDelta(Math.round((SG.min-PG.min)*10)/10," 分钟") : '<span class="tiny muted">上周无记录</span>'));
+    h+=wkLine("平均语速", (SG.wpm? SG.wpm+" wpm" : "本段无文本，不记语速"),
+      (SG.wpm&&PG.wpm? wkDelta(SG.wpm-PG.wpm," wpm") : ''));
+    h+=wkLine("平均停顿 / 最长停顿", SG.pauseAvg+" 次 · "+SG.longMax+"s",
+      (PG.any&&PG.pauseAvg? wkDelta(Math.round((SG.pauseAvg-PG.pauseAvg)*10)/10," 次") : ''));
+    h+=wkLine("自评均分", (SG.scoreAvg? SG.scoreAvg+" / 5" : "—"),
+      (SG.scoreAvg&&PG.scoreAvg? wkDelta(Math.round((SG.scoreAvg-PG.scoreAvg)*10)/10,"") : ''));
+    if(SG.earN) h+=wkLine("辨音正确率", SG.earAcc+"%（"+SG.earN+" 题）· 最弱 "+esc(SG.pairs.length? SG.pairs[0].k : "—"), "");
+    if(SG.retry) h+='<div class="fb warn" style="margin-top:8px">还有 '+SG.retry+' 句自评 1–2 分没重练完。</div>';
+  }
+  h+='</div>';
+  return h;
+}
+/* 话题卡完成：把这次录音的能量指标与机器判定一起入账（旧版只记次数与 60 秒） */
+function topicDone(i, mid){
+  var t=TOPICS[i]||{ t:"" };
+  var ctx=MICCTX[mid]||null, wv=(ctx&&ctx.wave)? ctx.wave : null;
+  var sec=Math.max(0, (ctx&&ctx.sec)? (ctx.sec|0) : 0);
+  var verdict="", score=3;
+  if(wv){
+    var okP = ((wv.pauseCount|0)<=2 && (!wv.longest || wv.longest.dur<3));
+    var okV = (wv.ratio>=0.55);
+    if(okP && okV){ verdict="稳：停顿少、发声连续"; score=4; }
+    else if(okV && !okP){ verdict="卡顿偏多：意群没连起来"; score=3; }
+    else if(okP && !okV){ verdict="发声偏少：多数时间在找词"; score=3; }
+    else { verdict="既卡又空：先说短的，把话说满"; score=2; }
+  }
+  try{ touch("say",1); markStep("say"); addSec(sec>0? sec : 60, "say"); }catch(e){}
+  try{
+    if(!(DB.sayLog instanceof Array)) DB.sayLog=[];
+    DB.sayLog.push({ t:Date.now(), target:("话题："+String(t.t||"").slice(0,60)), score:score, sec:(sec||60), mode:"topic",
+      wpm:0,
+      voiced: wv? (Math.round(wv.voiced*10)/10) : 0,
+      pauses: wv? (wv.pauseCount|0) : 0,
+      longest: (wv&&wv.longest)? (Math.round(wv.longest.dur*10)/10) : 0,
+      afterWord:0,
+      verdict: wv? (verdict+" · 发声"+Math.round(wv.ratio*100)+"% · 停顿"+(wv.pauseCount|0)+"次") : "" });
+    if(DB.sayLog.length>200) DB.sayLog=DB.sayLog.slice(-200);
+    saveDB();
+  }catch(e){}
+  closeSheet();
+  var h=sheetHead("话题卡已记录", String(t.t||"").slice(0,40));
+  if(wv){
+    h+='<div class="small" style="line-height:1.95">有效发声 <b>'+Math.round(wv.ratio*100)+'%</b> · 停顿 <b>'+(wv.pauseCount|0)+'</b> 次 · 最长 <b>'+(wv.longest? wv.longest.dur.toFixed(1) : "0.0")+'s</b> · 计时 <b>'+(sec||60)+'s</b></div>';
+    h+='<div class="fb '+(score>=3?"":"warn")+'" style="margin-top:9px"><b>判定：'+esc(verdict)+'</b><br>'+
+      (score>=4? "保持这个节奏：下一张卡把时限压到 90 秒，看同样的内容还能不能这么稳。"
+       : (okV? "把最长那次停顿所在的那个意群单独说三遍，再整段重录一次。"
+             : "不是嘴慢，是词不熟：先把要点写成 5 个关键词，用这 5 个词把话说满，再回来看这张卡。"))+'</div>';
+  }else{
+    h+='<div class="fb warn" style="margin-top:9px">这次没有录音，只记了时长与次数。下次点「录音自评」录一段，停顿次数与发声占比就能自动算出来。</div>';
+  }
+  h+='<div class="row" style="margin-top:10px"><button class="btn block" onclick="closeSheet();render()">好</button></div>';
+  openSheet(h);
 }
 function waveReportHtml(st, target){
   if(!st || !st.ok) return "";
@@ -8236,6 +8448,7 @@ var REC_ID = 0, REC_TICK = null, TIMER = null;
 function micBlock(target){
   REC_ID++;
   var id="mic"+REC_ID;
+  window.__lastMicId=id;   /* v36：话题卡需要拿到本次槽位 id，才能读回这次录音的能量结果 */
   var hint=micDegradeHint();
   return '<div id="'+id+'" data-target="'+esc(target).replace(/"/g,"&quot;")+'" style="margin-top:8px">'+
     '<button class="mic" onclick="recToggle(this,\''+id+'\')"><span class="dot"></span><span>'+(hint?"录音自评 · 点一下开始":"点一下开始说")+'</span></button>'+
@@ -8495,7 +8708,10 @@ function htmlOutput(arg){
 
 /* ---------- 说 ---------- */
 function sayHome(){
-  var h='<div class="card tight">'+
+  var h='';
+  /* v36：每次进「说」先看到纵向数据与欠账，而不是只看到菜单 */
+  try{ h+=sayMiniCard(); h+=sayRetryCard(); }catch(e){}
+  h+='<div class="card tight">'+
     '<div class="seg wrap" style="margin:0 0 10px">'+
     '<button class="'+(SAY_TAB==="ear"?"on":"")+'" onclick="setSayTab(\'ear\')">辨音</button>'+
     '<button class="'+(SAY_TAB==="shadow"?"on":"")+'" onclick="setSayTab(\'shadow\')">跟读</button>'+
@@ -8899,6 +9115,18 @@ function showIpa(){ toast("去「音理」看这个音的口型与舌位"); }
 function earAns(pick){
   var ok = pick===EAR.playing;
   if(ok) EAR.right++;
+  /* v36：辨音结果入库，形成「我的易混音」排行；原来只弹一次 toast 就蒸发了 */
+  try{
+    var pp=EAR.list[EAR.i]||null;
+    if(pp){
+      var ek=pp.a+" / "+pp.b;
+      if(!DB.earP || typeof DB.earP!=="object") DB.earP={};
+      var er=DB.earP[ek]||(DB.earP[ek]={ r:0, w:0, last:"" });
+      if(ok) er.r++; else er.w++;
+      er.last=dk();
+      saveDB();
+    }
+  }catch(e){}
   toast((ok?"对：":"错，这次是：")+EAR.playing);
   EAR.i++;
   setTimeout(earDraw, 420);
@@ -8917,8 +9145,9 @@ function openTopic(i){
      '<button class="btn sm" onclick="startTimer(60,\'ttimer\',function(){toast(\'时间到。数一下你说了几句？\')})">开始 60 秒</button>'+
      '<button class="btn sm ghost" onclick="stopTimer()">停</button></div></div>';
   h+=micBlock("");
-  h+='<div class="fb warn" style="margin-top:10px"><b>自评三问</b> 1) 说满 60 秒了吗 2) 有没有超过 3 秒的停顿 3) 有没有一句话是背出来的<br>三个都过，再去听一遍自己的录音（浏览器不存录音，可自己另录）。</div>';
-  h+='<div class="row mt8"><button class="btn block" onclick="closeSheet();touch(\'say\',1);markStep(\'say\');addSec(60,\'say\');render();toast(\'话题卡完成\')">完成这张卡</button></div>';
+  var mid=(window.__lastMicId||"");
+  h+='<div class="fb warn" style="margin-top:10px"><b>自评三问</b> 1) 说满 60 秒了吗 2) 有没有超过 3 秒的停顿 3) 有没有一句话是背出来的<br>录一段再点「完成」，停顿次数与发声占比会由录音能量自动算出（不依赖语音识别）；不录就只按这三问自评。</div>';
+  h+='<div class="row mt8"><button class="btn block" onclick="topicDone('+i+',\''+mid+'\')">完成这张卡</button></div>';
   openSheet(h);
 }
 
@@ -9710,6 +9939,9 @@ function htmlMe(){
     '</div></div>';
 
   h+='<div class="card"><div class="hd"><h3>最近五周</h3><div class="right"><span class="tiny muted">每格一天，越绿越多</span></div></div>'+heatHtml()+'</div>';
+
+  /* v36：口语进步卡（本周 vs 上周，数据来自 sayLog 录音能量分析） */
+  try{ h+=sayBoardHtml(); }catch(e){}
 
   /* v16：本周复盘入口（只显示本周汇总，详细报告在独立页） */
   var wkS=null;
@@ -16019,6 +16251,10 @@ function htmlWeek(){
     (WK.off!==0? '<button class="btn sm ghost" onclick="WK.off=0;render()">回到本周</button>':'')+
     '</div>'+
     '<div class="tiny muted" style="margin-top:8px;line-height:1.8">按自然周（周一至周日）统计，最远回看 8 周。全部本地计算，不发任何网络请求。</div></div>';
+
+  /* v36：口语客观记录独立成卡，先于「本周无记录」分支渲染——
+     哪怕这一周只录了几段音，也要能看到停顿与发声占比，而不是一片空白。 */
+  try{ h+=sayWeekCard(WK.off); }catch(e){}
 
   if(!S.any){
     h+='<div class="card"><div class="hd"><h3>本周无记录</h3><span class="sub">'+esc(wkLabel(r))+'</span></div>'+
